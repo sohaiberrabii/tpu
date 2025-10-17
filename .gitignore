@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.egg-info
+/dist
+
+# Notebooks
+*.ipynb
+
+# pdm
+/.pdm-plugins
+/.pdm-python
+/.venv
+/pdm.lock
+
+# tests
+*.vcd
+*.gtkw
+
+# amaranth
+/build
+
+# verilog codegen
+*.v
+
+# waveform
+/*.vcd
+/*.ron
+
+# misc
+*.svg
+pyrightconfig.json
+*.pdf
+
+# external
+examples/external
+
+# top level garbage python files
+/*.py
