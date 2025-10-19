@@ -244,8 +244,6 @@ class ActivationController(Component):
             m.d.sync += [
                 self.repeat_counter.eq(self.req.payload.reps),
                 self.src_req.payload.addr.eq(self.req.payload.src_addr),
-                self.dst.payload.addr.eq(self.req.payload.dst_addr),
-                self.dst.payload.actfn.eq(self.req.payload.actfn),
             ]
         with m.Elif(self.src_req.valid & self.src_req.ready):
             m.d.sync += [
@@ -257,6 +255,7 @@ class ActivationController(Component):
             m.d.sync += [
                 self.ack_counter.eq(self.req.payload.reps),
                 self.dst.payload.addr.eq(self.req.payload.dst_addr),
+                self.dst.payload.actfn.eq(self.req.payload.actfn),
             ]
         with m.Elif(self.dst.valid & self.dst.ready):
             m.d.sync += [

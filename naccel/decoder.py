@@ -16,7 +16,7 @@ class InstructionDecoder(Component):
             "weight_load_req": Out(stream.Signature(data.StructLayout({"addr": haddr_width, "reps": ceil_log2(max_repeats + 1)}))),
             "preload_req":     Out(stream.Signature(data.StructLayout({"wsel": 1}))),
             "ex_req":          Out(stream.Signature(ExecuteRequest(sp_addr_width, acc_addr_width, max_repeats))),
-            "activation_req":  Out(stream.Signature(ActivationRequest(sp_addr_width, acc_addr_width, max_repeats))),
+            "activation_req":  Out(stream.Signature(ActivationRequest(acc_addr_width, sp_addr_width, max_repeats))),
             "store_req":       Out(stream.Signature(Request(sp_addr_width, haddr_width, max_repeats))),
 
             "ex_done":         In(1),

@@ -41,7 +41,7 @@ class TPUConfig:
     host_data_width: int = 32
     host_addr_width: int = 32
 
-    max_reps: int = 8
+    max_reps: int = 15
 
     csr_addr_width: int = 2
     csr_data_width: int = 32
@@ -50,6 +50,7 @@ class TPUConfig:
 
 class TPU(Component):
     def __init__(self, config: TPUConfig):
+        assert config.rows == config.cols
         self.config = config
         maxreps = config.max_reps
         acc_addr_width = exact_log2(config.acc_mem_depth)
@@ -197,7 +198,7 @@ class TPU(Component):
 if __name__ == '__main__':
     from amaranth.back import verilog
 
-    config = TPUConfig(rows=2, cols=2, instr_fifo_depth=32)
+    config = TPUConfig(rows=8, cols=8, max_reps=15, instr_fifo_depth=32, act_mem_depth=32, acc_mem_depth=32, host_data_width=64, weight_fifo_depth=16)
     tpu = TPU(config)
     with open("tpu.v", 'w') as f:
         f.write(verilog.convert(tpu, name="TPU", emit_src=False))

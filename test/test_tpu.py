@@ -160,19 +160,25 @@ def tpu_matmul(m, k, n, tpu_conf, actfn=Activation.RELU, act_haddr=0, weight_had
     return program + [nop()]
 
 @pytest.mark.parametrize("data_width", [64])
+@pytest.mark.parametrize("max_reps", [15])
 @pytest.mark.parametrize("instr_fifo_depth", [32])
+@pytest.mark.parametrize("act_mem_depth", [32])
+@pytest.mark.parametrize("weight_fifo_depth", [16])
 @pytest.mark.parametrize(
     "dim, acc_mem_depth, m, k, n", [
     (8, 32, 8, 8, 8),
 ])
-def test_tpu_standalone(m, k, n, dim, acc_mem_depth, instr_fifo_depth, data_width, actfn=Activation.RELU):
-    config = TPUConfig(rows=dim, cols=dim, instr_fifo_depth=instr_fifo_depth, acc_mem_depth=acc_mem_depth, host_data_width=data_width)
+def test_tpu_standalone(m, k, n, dim, act_mem_depth, acc_mem_depth, weight_fifo_depth, instr_fifo_depth, data_width, max_reps, actfn=Activation.RELU):
+    config = TPUConfig(rows=dim, cols=dim, instr_fifo_depth=instr_fifo_depth, weight_fifo_depth=weight_fifo_depth,
+        acc_mem_depth=acc_mem_depth, act_mem_depth=act_mem_depth, host_data_width=data_width, max_reps=max_reps)
     tpu = TPU(config)
 
     actbuf, wbuf, expected = matmul_case(m, k, n, config, actfn=actfn)
     act_offset = len(wbuf)
     d_offset = act_offset + len(actbuf)
     instrs = tpu_matmul(m, k, n, config, actfn=actfn, act_haddr=act_offset * data_width // 8, d_haddr=d_offset * data_width // 8)
+    for insn in instrs:
+        print(insn)
 
     resbuf = unpacked(0, m * -(-n // config.cols) * -(-config.act_dtype.width * config.rows // data_width) * data_width, data_width)
     instr_offset = d_offset + len(resbuf)
