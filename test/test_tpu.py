@@ -60,20 +60,17 @@ async def axi4_r_process(ctx, bus, mem, data_width):
 def matmul_case(m, k, n, config, actfn=Activation.RELU):
     a = np.random.randint(*dtype_to_bounds(config.act_dtype), size=(m, k))
     b = np.random.randint(*dtype_to_bounds(config.weight_dtype), size=(k, n))
-    print("a:", ["".join([hex(x & ((1 << config.act_dtype.width) - 1))[2:] for x in row][::-1]) for row in a])
     d = a @ b
-    print("d:", ["".join([hex(x & ((1 << config.acc_dtype.width) - 1))[2:] for x in row][::-1]) for row in d])
     match actfn:
         case Activation.RELU: expected = (d >> 8).clip(min=0, max=255)
         case Activation.NOP: expected = (d >> 8).clip(max=255) & 0xFF
-    print("exp:", ["".join([hex(x & ((1 << config.act_dtype.width) - 1))[2:] for x in row][::-1]) for row in expected])
 
     mrows = config.acc_mem_depth
     kblocks = -(-k // config.rows)
     pacts = np.pad(a, ((0, 0), (0, kblocks * config.rows - k))).reshape(-1, kblocks, config.rows)
     acts = np.concatenate([
         pacts[:(m // mrows) * mrows].reshape(-1, mrows, kblocks, config.rows).transpose(0, 2, 1, 3).reshape(-1, config.rows),
-        pacts[-(m % mrows):].reshape(-1, kblocks, config.rows).transpose(1, 0, 2).reshape(-1, config.rows)])
+        pacts[(m // mrows) * mrows:].reshape(-1, kblocks, config.rows).transpose(1, 0, 2).reshape(-1, config.rows)])
     act_words = [word for row in acts.tolist() for word in repack(row, config.act_dtype.width, config.host_data_width)]
 
     nblocks = -(-n // config.cols)
@@ -104,7 +101,7 @@ def store(act_haddr, act_laddr, nrows):
 
 def run_tpu_sim(tpu, mem, total_instrs, instr_offset, vcdfn="tpu.vcd"):
     async def tb(ctx):
-        xfer_size = min(tpu.config.instr_fifo_depth, (1 << len(tpu.bus.arlen)) // tpu.instr_dma_reader.nbeats)
+        xfer_size = min(tpu.config.instr_fifo_depth, tpu.config.max_reps)
         ins_xfers = -(-total_instrs // xfer_size)
         for i in range(ins_xfers):
             await ctx.tick().until(tpu.tpu_ready.f.tpur.r_data)
@@ -126,13 +123,18 @@ def run_tpu_sim(tpu, mem, total_instrs, instr_offset, vcdfn="tpu.vcd"):
     periph_processes = [awp, wp, rp]
     run_sim(tpu, tb, processes=periph_processes, vcdfn=vcdfn)
 
+def batched(n, m):
+    q, r = divmod(n, m)
+    return [m] * q + ([r] if r else [])
+
+#FIXME: weights are reloaded even if tiling only occurs on m dim
 def tpu_matmul(m, k, n, tpu_conf, actfn=Activation.RELU, act_haddr=0, weight_haddr=0, d_haddr=0):
     mblocks = -(-m // tpu_conf.acc_mem_depth)
     nblocks = -(-n // tpu_conf.cols)
     kblocks = -(-k // tpu_conf.rows)
 
-    weight_tile = -(-tpu_conf.weight_dtype.width * tpu_conf.cols // tpu_conf.host_data_width) * tpu_conf.cols
-    act_tile = -(-tpu_conf.rows * tpu_conf.act_dtype.width // tpu_conf.host_data_width)
+    w_tile_bytes = -(-tpu_conf.weight_dtype.width * tpu_conf.cols // tpu_conf.host_data_width) * tpu_conf.rows * tpu_conf.host_data_width // 8
+    act_row_bytes = -(-tpu_conf.rows * tpu_conf.act_dtype.width // tpu_conf.host_data_width) * tpu_conf.host_data_width // 8
 
     program = []
     st_act_offset = 0
@@ -142,21 +144,25 @@ def tpu_matmul(m, k, n, tpu_conf, actfn=Activation.RELU, act_haddr=0, weight_had
             nrows = tpu_conf.acc_mem_depth if k < mblocks - 1 else m - k * tpu_conf.acc_mem_depth
             for i in range(kblocks):
                 program += [
-                    load_ha(act_haddr + ld_act_offset, 0, nrows),
-                    load_hw(weight_haddr + (i * weight_tile + j * weight_tile * kblocks), tpu_conf.rows),
-                    load_w(wsel=i % 2),
+                    *[load_ha(act_haddr + ld_act_offset + i * tpu_conf.max_reps * act_row_bytes, i * tpu_conf.max_reps, rep)
+                        for i, rep in enumerate(batched(nrows, tpu_conf.max_reps))],
+                    load_hw(weight_haddr + (i * w_tile_bytes + j * w_tile_bytes * kblocks), tpu_conf.rows),
+                    load_w(),
                     spad_sync(),
                     preload_sync(),
                 ]
-                program.append(matmul(0, 0, nrows, wsel=i % 2, acc=i > 0))
-                ld_act_offset += act_tile * nrows
+                program.extend([matmul(ii * tpu_conf.max_reps, ii * tpu_conf.max_reps, rep, acc=i > 0)
+                    for ii, rep in enumerate(batched(nrows, tpu_conf.max_reps))])
+                ld_act_offset += act_row_bytes * nrows
             program += [
                 matmul_sync(),
-                activate(0, 0, nrows, actfn=actfn),
+                *[activate(i * tpu_conf.max_reps, i * tpu_conf.max_reps, rep, actfn=actfn) for i, rep in enumerate(batched(nrows, tpu_conf.max_reps))],
                 spad_sync(),
-                store(d_haddr + st_act_offset, 0, nrows),
+                *[store(d_haddr + st_act_offset + i * tpu_conf.max_reps * act_row_bytes, i * tpu_conf.max_reps, rep)
+                    for i, rep in enumerate(batched(nrows, tpu_conf.max_reps))],
+                spad_sync(),
             ]
-            st_act_offset += act_tile * nrows
+            st_act_offset += act_row_bytes * nrows
     return program + [nop()]
 
 @pytest.mark.parametrize("data_width", [64])
@@ -166,7 +172,7 @@ def tpu_matmul(m, k, n, tpu_conf, actfn=Activation.RELU, act_haddr=0, weight_had
 @pytest.mark.parametrize("weight_fifo_depth", [16])
 @pytest.mark.parametrize(
     "dim, acc_mem_depth, m, k, n", [
-    (8, 32, 8, 8, 8),
+    (8, 32, 23, 65, 67),
 ])
 def test_tpu_standalone(m, k, n, dim, act_mem_depth, acc_mem_depth, weight_fifo_depth, instr_fifo_depth, data_width, max_reps, actfn=Activation.RELU):
     config = TPUConfig(rows=dim, cols=dim, instr_fifo_depth=instr_fifo_depth, weight_fifo_depth=weight_fifo_depth,
@@ -177,8 +183,6 @@ def test_tpu_standalone(m, k, n, dim, act_mem_depth, acc_mem_depth, weight_fifo_
     act_offset = len(wbuf)
     d_offset = act_offset + len(actbuf)
     instrs = tpu_matmul(m, k, n, config, actfn=actfn, act_haddr=act_offset * data_width // 8, d_haddr=d_offset * data_width // 8)
-    for insn in instrs:
-        print(insn)
 
     resbuf = unpacked(0, m * -(-n // config.cols) * -(-config.act_dtype.width * config.rows // data_width) * data_width, data_width)
     instr_offset = d_offset + len(resbuf)
@@ -186,5 +190,4 @@ def test_tpu_standalone(m, k, n, dim, act_mem_depth, acc_mem_depth, weight_fifo_
     mem = wbuf + actbuf + resbuf + ibuf
 
     run_tpu_sim(tpu, mem, len(instrs), instr_offset, vcdfn="tpu.vcd")
-    print(mem)
     assert mem[d_offset:d_offset + len(resbuf)] == expected

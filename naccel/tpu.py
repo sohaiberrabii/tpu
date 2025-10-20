@@ -48,6 +48,7 @@ class TPUConfig:
     csr_offsets = {"tpur": 0x0, "tpus": 0x4, "insadr": 0x8, "nins": 0xc}
 
 
+#FIXME: different max reps? the only constrained max_reps is the load due to axi burst even though a burst sequencer solves it
 class TPU(Component):
     def __init__(self, config: TPUConfig):
         assert config.rows == config.cols
@@ -179,7 +180,7 @@ class TPU(Component):
         connect(m, self.instr_fifo.r_stream, self.decoder.instr)
         connect(m, self.instr_dma_reader.resp, self.instr_fifo.w_stream)
         m.d.comb += [
-            self.tpu_ready.f.tpur.r_data.eq(self.instr_dma_reader.req.ready),
+            self.tpu_ready.f.tpur.r_data.eq(self.instr_dma_reader.req.ready & (self.instr_fifo.r_level == 0)),
             self.instr_dma_reader.req.valid.eq(self.tpu_start.f.tpus.w_stb),
             self.instr_dma_reader.req.payload.addr.eq(self.instr_adr.f.insadr.data),
             self.instr_dma_reader.req.payload.reps.eq(self.ninstrs.f.nins.data),

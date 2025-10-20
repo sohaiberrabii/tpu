@@ -41,7 +41,10 @@ class Accumulator(Component):
             same_addr_rdw.eq(ren & wen & (waddr == raddr)),
             wdata_q.eq(wr_port.data),
         ]
-        rdata = am.Mux(same_addr_rdw, wdata_q, rd_port.data)
+
+        rdata = am.Signal(self.width)
+        m.d.comb += rdata.eq(am.Mux(same_addr_rdw, wdata_q, rd_port.data))
+
         resp_valid = am.Signal()
         m.d.sync += resp_valid.eq(self.read.req.valid & self.read.req.ready)
         m.d.comb += [
@@ -57,7 +60,7 @@ class Accumulator(Component):
         with m.Elif(self.resp_q.valid & self.read.resp.ready):
             m.d.sync += self.resp_q.valid.eq(0)
 
-        if isinstance(self.width, data.ArrayLayout): # not rd_port.data
+        if isinstance(self.width, data.ArrayLayout):
             acc_data = am.Cat((x + y)[:self.width.elem_shape.width] for x, y in zip(rdata, self.write_q.payload.data))
         else:
             acc_data = rdata + self.write_q.payload.data

@@ -34,9 +34,10 @@ class InstructionDecoder(Component):
             (self.activation_req.valid & ~self.activation_req.ready) |
             (self.weight_load_req.valid & ~self.weight_load_req.ready) |
             (self.ex_req.valid & ~self.ex_req.ready) |
+            (self.store_req.valid & ~self.store_req.ready) |
             (preload_sync & ~self.preload_req.ready) |
             (matmul_sync & ~self.ex_done) |
-            (spad_sync & ~(self.load_req.ready & self.activation_req.ready))
+            (spad_sync & ~(self.load_req.ready & self.activation_req.ready & self.store_req.ready))
         )
 
         m.d.comb += [

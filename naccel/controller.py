@@ -58,8 +58,6 @@ class StoreController(Component):
     def elaborate(self, _):
         m = am.Module()
 
-        src_req_done = self.repeat_counter == 0
-
         with m.If(self.req.valid & self.req.ready):
             m.d.sync += [
                 self.repeat_counter.eq(self.req.payload.reps),
@@ -88,8 +86,9 @@ class StoreController(Component):
         with m.Elif(src_resp_q.valid & self.dst.ready):
             m.d.sync += src_resp_q.valid.eq(0)
 
+        src_req_done = self.repeat_counter == 0
         m.d.comb += [
-            self.req.ready.eq(src_req_done & (self.ack_counter == 0)),
+            self.req.ready.eq(src_req_done & (self.ack_counter == 0) & self.dst_req.ready),
             self.src_req.valid.eq(~src_req_done & self.dst.ready),
 
             self.dst_req.valid.eq(self.req.valid),
