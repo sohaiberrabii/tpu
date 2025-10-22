@@ -34,9 +34,5 @@ pyrightconfig.json
 # external
 examples/external
 
-# top level temporary files
-/*.py
-/*.sv
-
 # cocotb
 sim_build
