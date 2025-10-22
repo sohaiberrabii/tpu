@@ -9,6 +9,7 @@ from amaranth_soc import csr
 from naccel.pe import PE, SystolicDelay
 from naccel.controller import ExecuteController, PreloadController, ActivationController, LoadController, StoreController
 from naccel.memory import Scratchpad, Accumulator
+from naccel.isa import ISALayout
 from naccel.decoder import InstructionDecoder
 from naccel import bus
 from naccel.bus import DMAReader, DMAWriter, Arbiter, AXI4Lite, AXI4LiteCSRBridge
@@ -46,6 +47,13 @@ class TPUConfig:
     csr_addr_width: int = 2
     csr_data_width: int = 32
     csr_offsets = {"tpur": 0x0, "tpus": 0x4, "insadr": 0x8, "nins": 0xc}
+
+    @staticmethod
+    def fromdict(config: dict):
+        return TPUConfig(**{k: IntType(**v) if k in ["weight_dtype", "act_dtype", "acc_dtype"] else v for k, v in config.items()})
+    @property
+    def isa_layout(self):
+        return ISALayout(self.host_addr_width, exact_log2(self.act_mem_depth), exact_log2(self.acc_mem_depth), self.max_reps)
 
 
 #FIXME: different max reps? the only constrained max_reps is the load due to axi burst even though a burst sequencer solves it

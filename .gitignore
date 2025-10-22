@@ -17,7 +17,7 @@ __pycache__/
 *.gtkw
 
 # amaranth
-/build
+/test/cocotb_test/build
 
 # verilog codegen
 *.v
@@ -34,5 +34,9 @@ pyrightconfig.json
 # external
 examples/external
 
-# top level garbage python files
+# top level temporary files
 /*.py
+/*.sv
+
+# cocotb
+sim_build

@@ -1,10 +1,8 @@
 from functools import partial
 import pytest
-import numpy as np
 
 from naccel.tpu import TPU, TPUConfig
-from naccel.isa import Activation, Op, LoadFunct, MoveFunct
-from test.helpers import run_sim, unpacked, repack, axi4lite_write, dtype_to_bounds
+from test.helpers import *
 
 beats_remaining = 0
 current_addr = None
@@ -57,48 +55,6 @@ async def axi4_r_process(ctx, bus, mem, data_width):
             current_addr = araddr
             beats_remaining = arlen + 1
 
-def matmul_case(m, k, n, config, actfn=Activation.RELU):
-    a = np.random.randint(*dtype_to_bounds(config.act_dtype), size=(m, k))
-    b = np.random.randint(*dtype_to_bounds(config.weight_dtype), size=(k, n))
-    d = a @ b
-    match actfn:
-        case Activation.RELU: expected = (d >> 8).clip(min=0, max=255)
-        case Activation.NOP: expected = (d >> 8).clip(max=255) & 0xFF
-
-    mrows = config.acc_mem_depth
-    kblocks = -(-k // config.rows)
-    pacts = np.pad(a, ((0, 0), (0, kblocks * config.rows - k))).reshape(-1, kblocks, config.rows)
-    acts = np.concatenate([
-        pacts[:(m // mrows) * mrows].reshape(-1, mrows, kblocks, config.rows).transpose(0, 2, 1, 3).reshape(-1, config.rows),
-        pacts[(m // mrows) * mrows:].reshape(-1, kblocks, config.rows).transpose(1, 0, 2).reshape(-1, config.rows)])
-    act_words = [word for row in acts.tolist() for word in repack(row, config.act_dtype.width, config.host_data_width)]
-
-    nblocks = -(-n // config.cols)
-    pweights = np.pad(b, ((0, kblocks * config.rows - k), (0, nblocks * config.cols - n))).reshape(kblocks, config.rows, nblocks, config.cols)
-    flipped_weights = np.flip(pweights, axis=1).transpose(2, 0, 1, 3).reshape(-1, config.cols)
-    weight_words = [word for row in flipped_weights.tolist() for word in repack(row, config.weight_dtype.width, config.host_data_width)]
-
-    pexp = np.pad(expected, ((0, 0), (0, nblocks * config.cols - n))).reshape(m, nblocks, config.cols).transpose(1, 0, 2).reshape(-1, config.cols)
-    expected_words = [word for row in pexp.tolist() for word in repack(row, config.act_dtype.width, config.host_data_width)]
-    return act_words, weight_words, expected_words
-
-def load_hw(weight_haddr, nrows):
-    return {"op": Op.LOAD, "funct": {"load": LoadFunct.HOST_WEIGHT}, "reps": nrows, "addr1": {"load_store": weight_haddr}}
-def load_ha(act_haddr, act_laddr, nrows):
-    return {"op": Op.LOAD, "funct": {"load": LoadFunct.HOST_ACT}, "reps": nrows, "addr1": {"load_store": act_haddr}, "addr2": act_laddr}
-def load_w(wsel=0): return {"op": Op.MOVE, "funct": {"move": MoveFunct.PRELOAD_WEIGHT}, "opt": {"acc_wsel": {"wsel": wsel}}}
-def spad_sync(): return {"op": Op.SPAD_SYNC}
-def preload_sync(): return {"op": Op.PRELOAD_SYNC}
-def matmul_sync(): return {"op": Op.MATMUL_SYNC}
-def nop(): return {"op": Op.NOP}
-def matmul(act_addr, acc_addr, nrows, wsel=0, acc=0):
-    return {"op": Op.MATMUL, "addr1": {"move_exec": acc_addr}, "addr2": act_addr, "reps": nrows, "opt": {"acc_wsel": {"wsel": wsel, "acc": acc}}}
-def activate(act_addr, acc_addr, nrows, actfn=Activation.RELU):
-    return {"op": Op.MOVE, "funct": {"move": MoveFunct.ACTIVATE}, "addr1": {"move_exec": acc_addr}, "addr2": act_addr, "reps": nrows,
-        "opt": {"actfn": actfn}}
-def store(act_haddr, act_laddr, nrows):
-    return {"op": Op.STORE, "reps": nrows, "addr1": {"load_store": act_haddr}, "addr2": act_laddr}
-
 def run_tpu_sim(tpu, mem, total_instrs, instr_offset, vcdfn="tpu.vcd"):
     async def tb(ctx):
         xfer_size = min(tpu.config.instr_fifo_depth, tpu.config.max_reps)
@@ -123,47 +79,7 @@ def run_tpu_sim(tpu, mem, total_instrs, instr_offset, vcdfn="tpu.vcd"):
     periph_processes = [awp, wp, rp]
     run_sim(tpu, tb, processes=periph_processes, vcdfn=vcdfn)
 
-def batched(n, m):
-    q, r = divmod(n, m)
-    return [m] * q + ([r] if r else [])
-
 #FIXME: weights are reloaded even if tiling only occurs on m dim
-def tpu_matmul(m, k, n, tpu_conf, actfn=Activation.RELU, act_haddr=0, weight_haddr=0, d_haddr=0):
-    mblocks = -(-m // tpu_conf.acc_mem_depth)
-    nblocks = -(-n // tpu_conf.cols)
-    kblocks = -(-k // tpu_conf.rows)
-
-    w_tile_bytes = -(-tpu_conf.weight_dtype.width * tpu_conf.cols // tpu_conf.host_data_width) * tpu_conf.rows * tpu_conf.host_data_width // 8
-    act_row_bytes = -(-tpu_conf.rows * tpu_conf.act_dtype.width // tpu_conf.host_data_width) * tpu_conf.host_data_width // 8
-
-    program = []
-    st_act_offset = 0
-    for j in range(nblocks):
-        ld_act_offset = 0
-        for k in range(mblocks):
-            nrows = tpu_conf.acc_mem_depth if k < mblocks - 1 else m - k * tpu_conf.acc_mem_depth
-            for i in range(kblocks):
-                program += [
-                    *[load_ha(act_haddr + ld_act_offset + i * tpu_conf.max_reps * act_row_bytes, i * tpu_conf.max_reps, rep)
-                        for i, rep in enumerate(batched(nrows, tpu_conf.max_reps))],
-                    load_hw(weight_haddr + (i * w_tile_bytes + j * w_tile_bytes * kblocks), tpu_conf.rows),
-                    load_w(),
-                    spad_sync(),
-                    preload_sync(),
-                ]
-                program.extend([matmul(ii * tpu_conf.max_reps, ii * tpu_conf.max_reps, rep, acc=i > 0)
-                    for ii, rep in enumerate(batched(nrows, tpu_conf.max_reps))])
-                ld_act_offset += act_row_bytes * nrows
-            program += [
-                matmul_sync(),
-                *[activate(i * tpu_conf.max_reps, i * tpu_conf.max_reps, rep, actfn=actfn) for i, rep in enumerate(batched(nrows, tpu_conf.max_reps))],
-                spad_sync(),
-                *[store(d_haddr + st_act_offset + i * tpu_conf.max_reps * act_row_bytes, i * tpu_conf.max_reps, rep)
-                    for i, rep in enumerate(batched(nrows, tpu_conf.max_reps))],
-                spad_sync(),
-            ]
-            st_act_offset += act_row_bytes * nrows
-    return program + [nop()]
 
 @pytest.mark.parametrize("data_width", [64])
 @pytest.mark.parametrize("max_reps", [15])
