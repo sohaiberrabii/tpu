@@ -18,4 +18,3 @@ class Shifter(Component):
             with m.If(self.en):
                 m.d.sync += self.regs.eq(am.Cat(self.d, self.regs[:-1]))
         return m
-

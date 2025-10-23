@@ -36,3 +36,6 @@ examples/external
 
 # cocotb
 sim_build
+
+# fpga
+fpga/build

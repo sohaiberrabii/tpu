@@ -55,6 +55,9 @@ class TPUConfig:
     def isa_layout(self):
         return ISALayout(self.host_addr_width, exact_log2(self.act_mem_depth), exact_log2(self.acc_mem_depth), self.max_reps)
 
+    def __post_init__(self):
+        assert self.rows == self.cols, "non square sa is not supported yet"
+
 
 #FIXME: different max reps? the only constrained max_reps is the load due to axi burst even though a burst sequencer solves it
 class TPU(Component):

@@ -55,23 +55,28 @@ def matmul_case(m, k, n, config, actfn=Activation.RELU):
     match actfn:
         case Activation.RELU: expected = (d >> 8).clip(min=0, max=255)
         case Activation.NOP: expected = (d >> 8).clip(max=255) & 0xFF
-
-    mrows = config.acc_mem_depth
-    kblocks = -(-k // config.rows)
-    pacts = np.pad(a, ((0, 0), (0, kblocks * config.rows - k))).reshape(-1, kblocks, config.rows)
-    acts = np.concatenate([
-        pacts[:(m // mrows) * mrows].reshape(-1, mrows, kblocks, config.rows).transpose(0, 2, 1, 3).reshape(-1, config.rows),
-        pacts[(m // mrows) * mrows:].reshape(-1, kblocks, config.rows).transpose(1, 0, 2).reshape(-1, config.rows)])
-    act_words = [word for row in acts.tolist() for word in repack(row, config.act_dtype.width, config.host_data_width)]
+    a_words, b_words = reshape_for_matmul(a, b, config)
 
     nblocks = -(-n // config.cols)
-    pweights = np.pad(b, ((0, kblocks * config.rows - k), (0, nblocks * config.cols - n))).reshape(kblocks, config.rows, nblocks, config.cols)
-    flipped_weights = np.flip(pweights, axis=1).transpose(2, 0, 1, 3).reshape(-1, config.cols)
-    weight_words = [word for row in flipped_weights.tolist() for word in repack(row, config.weight_dtype.width, config.host_data_width)]
-
     pexp = np.pad(expected, ((0, 0), (0, nblocks * config.cols - n))).reshape(m, nblocks, config.cols).transpose(1, 0, 2).reshape(-1, config.cols)
     expected_words = [word for row in pexp.tolist() for word in repack(row, config.act_dtype.width, config.host_data_width)]
-    return act_words, weight_words, expected_words
+    return a_words, b_words, expected_words
+
+def reshape_for_matmul(a, b, config):
+    m, k, n = *a.shape, b.shape[1]
+    mrows = config.acc_mem_depth
+    kblocks = -(-k // config.rows)
+    padded_a = np.pad(a, ((0, 0), (0, kblocks * config.rows - k))).reshape(-1, kblocks, config.rows)
+    reshaped_a = np.concatenate([
+        padded_a[:(m // mrows) * mrows].reshape(-1, mrows, kblocks, config.rows).transpose(0, 2, 1, 3).reshape(-1, config.rows),
+        padded_a[(m // mrows) * mrows:].reshape(-1, kblocks, config.rows).transpose(1, 0, 2).reshape(-1, config.rows)])
+    a_words = [word for row in reshaped_a.tolist() for word in repack(row, config.act_dtype.width, config.host_data_width)]
+
+    nblocks = -(-n // config.cols)
+    padded_b = np.pad(b, ((0, kblocks * config.rows - k), (0, nblocks * config.cols - n))).reshape(kblocks, config.rows, nblocks, config.cols)
+    flipped_b = np.flip(padded_b, axis=1).transpose(2, 0, 1, 3).reshape(-1, config.cols)
+    b_words = [word for row in flipped_b.tolist() for word in repack(row, config.weight_dtype.width, config.host_data_width)]
+    return a_words, b_words
 
 def load_hw(weight_haddr, nrows):
     return {"op": Op.LOAD, "funct": {"load": LoadFunct.HOST_WEIGHT}, "reps": nrows, "addr1": {"load_store": weight_haddr}}
