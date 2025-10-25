@@ -20,9 +20,6 @@ setup(
         "cocotb": [
             "cocotb @ git+https://github.com/cocotb/cocotb.git",
         ],
-        "pynq": [
-            "pynq",
-        ],
     },
 
 )

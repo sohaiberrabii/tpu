@@ -1,12 +1,12 @@
+import os
 import sys
 import urllib.request
 import tempfile
 import zipfile
-import json
 from pathlib import Path
 import subprocess
 from dataclasses import asdict
-from functools import reduce
+import json
 
 from amaranth import Module
 from amaranth.lib import wiring
@@ -52,11 +52,10 @@ class InterfaceRenamer(wiring.Component):
         m.submodules.dut = self.dut
         for path, member, value in self.dut.signature.flatten(self.dut):
             renamed_value = getattr(self, '_'.join(path))
-            dut_value = reduce(getattr, path, self.dut)
             if member.flow == wiring.In:
-                m.d.sync += dut_value.eq(renamed_value)
+                m.d.sync += value.eq(renamed_value)
             else:
-                m.d.sync += renamed_value.eq(dut_value)
+                m.d.sync += renamed_value.eq(value)
         return m
 
 def generate_bitstream(config, board="pynq-z2", build_dir=None):
@@ -74,13 +73,27 @@ def generate_bitstream(config, board="pynq-z2", build_dir=None):
 
     with open(build_dir / "tpu.v", 'w') as f:
         f.write(convert(InterfaceRenamer(TPU(config)), name="TPU", emit_src=False, strip_internal_attrs=True))
+    with open(build_dir / "config.json", "w") as f:
+        json.dump(asdict(config), f, indent=4)
 
     vivado_cmd = ["vivado", "-mode", "batch", "-nolog", "-nojournal", "-source"]
     res = subprocess.run(vivado_cmd + [scriptdir / "build.tcl"], stderr=subprocess.PIPE, encoding="utf-8")
-    if res.returncode: raise RuntimeError(res.stderr)
+    if res.returncode:
+        raise RuntimeError(res.stderr)
+
+    return next(build_dir.rglob("*.bit")), next(build_dir.rglob("*.hwh"))
+
+def deploy(config_fn, bit_fn, hwh_fn, remote_dir=""):
+    assert (dev := os.getenv("PYNQ")),  f"PYNQ env var should be set to properly configured ssh alias of pynq-z2 device"
+    try:
+        subprocess.run(["scp", config_fn, bit_fn, hwh_fn, f"{dev}:{remote_dir}"], check=True)
+    except subprocess.CalledProcessError:
+        raise RuntimeError(f"scp failed to deploy to ssh alias PYNQ={dev}")
 
 
 if __name__ == '__main__':
     from naccel.tpu import TPUConfig
     config = TPUConfig(rows=8, cols=8, max_reps=15, instr_fifo_depth=32, act_mem_depth=32, acc_mem_depth=32, host_data_width=64, weight_fifo_depth=16)
     generate_bitstream(config)
+    with open("fpga/build/config.json", "w") as f:
+        json.dump(asdict(config), f, indent=4)

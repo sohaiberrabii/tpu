@@ -56,6 +56,11 @@ connect_bd_net [get_bd_pins rst_ps7_0_100M/peripheral_aresetn] \
    [get_bd_pins axi_periph/ARESETN] \
    [get_bd_pins inv_rst/Op1]
 
+assign_bd_address -offset 0x40000000 -range 0x00001000 -target_address_space [get_bd_addr_spaces processing_system7/Data] \
+  [get_bd_addr_segs TPU_0/ctrl/reg0] -force
+assign_bd_address -offset 0x00000000 -range 0x20000000 -target_address_space [get_bd_addr_spaces TPU_0/bus] \
+  [get_bd_addr_segs processing_system7/S_AXI_HP0/HP0_DDR_LOWOCM] -force
+
 regenerate_bd_layout
 save_bd_design
 
