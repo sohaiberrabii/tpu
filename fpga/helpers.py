@@ -6,8 +6,12 @@ import json
 from pathlib import Path
 import subprocess
 from dataclasses import asdict
+from functools import reduce
 
+from amaranth import Module
+from amaranth.lib import wiring
 from amaranth.back.verilog import convert
+from amaranth.lib import wiring
 from naccel.tpu import TPU
 
 
@@ -38,6 +42,23 @@ def fetch(url, fn=None, dstdir=None, pbar_width=20):
         pbar.update(close=True)
     return fp
 
+class InterfaceRenamer(wiring.Component):
+    def __init__(self, dut):
+        self.dut = dut
+        super().__init__({'_'.join(path): member for path, member, _ in dut.signature.flatten(dut)})
+
+    def elaborate(self, _):
+        m = Module()
+        m.submodules.dut = self.dut
+        for path, member, value in self.dut.signature.flatten(self.dut):
+            renamed_value = getattr(self, '_'.join(path))
+            dut_value = reduce(getattr, path, self.dut)
+            if member.flow == wiring.In:
+                m.d.sync += dut_value.eq(renamed_value)
+            else:
+                m.d.sync += renamed_value.eq(dut_value)
+        return m
+
 def generate_bitstream(config, board="pynq-z2", build_dir=None):
     assert board == "pynq-z2", "only pynq-z2 is currently supported"
     board_files = {
@@ -51,21 +72,12 @@ def generate_bitstream(config, board="pynq-z2", build_dir=None):
             with zipfile.ZipFile(fetch(board_files[board], dstdir=temp_dir), 'r') as zf:
                 zf.extractall(build_dir)
 
-    #FIXME: the verilog need post gen modifications to work with vivado scripts
-    print(f"Generating verilog with configuration: {json.dumps(asdict(config), indent=2)}")
     with open(build_dir / "tpu.v", 'w') as f:
-        f.write(convert(TPU(config), name="TPU", emit_src=False, strip_internal_attrs=True))
+        f.write(convert(InterfaceRenamer(TPU(config)), name="TPU", emit_src=False, strip_internal_attrs=True))
 
-    vivado_cmd = ["vivado", "-mode", "batch", "-source"]
-    print("Generating Block Design")
-    bd_result = subprocess.run(vivado_cmd + [scriptdir / "create_bd.tcl"], stderr=subprocess.PIPE, encoding="utf-8")
-    if bd_result.returncode: raise RuntimeError(bd_result.stderr)
-    print("Running Synthesis & Implementation")
-    impl_result = subprocess.run(vivado_cmd + [scriptdir / "build.tcl"], stderr=subprocess.PIPE, encoding="utf-8")
-    if impl_result.returncode: raise RuntimeError(impl_result.stderr)
-    print("DONE")
-    print("BIT:"+ next(build_dir.rglob("tpu_wrapper.bit")))
-    print("HWH:"+ next(build_dir.rglob("tpu.hwh")))
+    vivado_cmd = ["vivado", "-mode", "batch", "-nolog", "-nojournal", "-source"]
+    res = subprocess.run(vivado_cmd + [scriptdir / "build.tcl"], stderr=subprocess.PIPE, encoding="utf-8")
+    if res.returncode: raise RuntimeError(res.stderr)
 
 
 if __name__ == '__main__':

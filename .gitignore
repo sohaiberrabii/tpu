@@ -39,3 +39,9 @@ sim_build
 
 # fpga
 fpga/build
+
+# vivado
+*.jou
+*.log
+/.Xil
+
