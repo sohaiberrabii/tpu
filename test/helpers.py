@@ -1,10 +1,11 @@
-import operator
-import functools
+import random
 
 import numpy as np
 from amaranth.sim import Simulator, Period
 
-from naccel.isa import Activation, Op, LoadFunct, MoveFunct
+from naccel.isa import *
+from naccel.sw import *
+from naccel.tpu import IntType
 
 def run_sim(dut, tb, processes=[], comb=False, vcdfn=None):
     sim = Simulator(dut)
@@ -18,18 +19,6 @@ def run_sim(dut, tb, processes=[], comb=False, vcdfn=None):
     else:
         with sim.write_vcd(vcdfn):
            sim.run()
-
-def dtype_to_bounds(dt): return (-1 << dt.width - 1, (1 << dt.width - 1) - 1) if dt.signed else (0, (1 << dt.width) - 1)
-
-def unpacked(v, width, gran):
-    return [(v >> i * gran) & ((1 << gran) - 1) for i in range(-(-width // gran))]
-
-def packed(vals, width):
-    return functools.reduce(operator.or_, map(lambda x: (x[1] & ((1 << width) - 1)) << x[0] * width, enumerate(vals)))
-
-def repack(vals, src_width, target_width, aligned=False):
-    aligned_width = -(-src_width // target_width) * target_width if aligned else src_width
-    return unpacked(packed(vals, aligned_width), len(vals) * aligned_width, target_width)
 
 async def axi4lite_write(ctx, bus, addr, wdata):
     ctx.set(bus.bready, 1)
@@ -48,85 +37,90 @@ async def axi4lite_read(ctx, bus, addr):
     await ctx.tick()
     return ctx.get(bus.rdata)
 
-def matmul_case(m, k, n, config, actfn=Activation.RELU):
-    a = np.random.randint(*dtype_to_bounds(config.act_dtype), size=(m, k))
-    b = np.random.randint(*dtype_to_bounds(config.weight_dtype), size=(k, n))
-    d = a @ b
-    match actfn:
-        case Activation.RELU: expected = (d >> 8).clip(min=0, max=255)
-        case Activation.NOP: expected = (d >> 8).clip(max=255) & 0xFF
-    a_words, b_words = reshape_for_matmul(a, b, config)
+def matmul_case(m, k, n, config):
+    np.set_printoptions(linewidth=150)
+    a_dtype, b_dtype, c_dtype = config.act_dtype, config.weight_dtype, config.acc_dtype
+    a = np.random.randint(*(a_bounds := dtype_to_bounds(a_dtype)), size=(m, k))
+    b = np.random.randint(*dtype_to_bounds(b_dtype), size=(k, n))
+    # print("a:")
+    # print(a)
+    # for row in a:
+    #     print(hex(packed(row.tolist(), config.act_dtype.width))[2:])
+    # print("b:")
+    # print(b)
+    # for row in b:
+    #     print(hex(packed(row.tolist(), config.weight_dtype.width))[2:])
+    # print("psums:")
+    # for i in range(2):
+    #     print(f"psum {i}:")
+    #     print(a[:, i * 8:(i + 1) * 8] @ b[i*8:(i + 1)*8, :])
 
-    nblocks = -(-n // config.cols)
-    pexp = np.pad(expected, ((0, 0), (0, nblocks * config.cols - n))).reshape(m, nblocks, config.cols).transpose(1, 0, 2).reshape(-1, config.cols)
-    expected_words = [word for row in pexp.tolist() for word in repack(row, config.act_dtype.width, config.host_data_width)]
-    return a_words, b_words, expected_words
+    #NOTE: if c values are too large, then a and b psums become irrelevant after saturating scaling
+    testc_dtype = IntType(width=a_dtype.width + b_dtype.width, signed=a_dtype.signed or b_dtype.signed)
+    c = np.random.randint(*dtype_to_bounds(testc_dtype), size=(1, n))
 
-def reshape_for_matmul(a, b, config):
-    m, k, n = *a.shape, b.shape[1]
-    mrows = config.acc_mem_depth
-    kblocks = -(-k // config.rows)
-    padded_a = np.pad(a, ((0, 0), (0, kblocks * config.rows - k))).reshape(-1, kblocks, config.rows)
-    reshaped_a = np.concatenate([
-        padded_a[:(m // mrows) * mrows].reshape(-1, mrows, kblocks, config.rows).transpose(0, 2, 1, 3).reshape(-1, config.rows),
-        padded_a[(m // mrows) * mrows:].reshape(-1, kblocks, config.rows).transpose(1, 0, 2).reshape(-1, config.rows)])
-    a_words = [word for row in reshaped_a.tolist() for word in repack(row, config.act_dtype.width, config.host_data_width)]
+    # print(c)
+    # print("c:", hex(packed(c[0].tolist(), config.acc_dtype.width))[2:])
 
-    nblocks = -(-n // config.cols)
-    padded_b = np.pad(b, ((0, kblocks * config.rows - k), (0, nblocks * config.cols - n))).reshape(kblocks, config.rows, nblocks, config.cols)
-    flipped_b = np.flip(padded_b, axis=1).transpose(2, 0, 1, 3).reshape(-1, config.cols)
-    b_words = [word for row in flipped_b.tolist() for word in repack(row, config.weight_dtype.width, config.host_data_width)]
-    return a_words, b_words
+    actfn = random.choice(list(Activation))
+    zd    = random.randint(*a_bounds)
+    shamt = np.random.randint(30, 40, size=(1,))
+    qmul  = np.random.randint(0, dtype_to_bounds(c_dtype)[1], size=(1,))
+    expected = qmatmul(a, b, c, zd, qmul, shamt, a_dtype, c_dtype, actfn=actfn)
 
-def load_hw(weight_haddr, nrows):
-    return {"op": Op.LOAD, "funct": {"load": LoadFunct.HOST_WEIGHT}, "reps": nrows, "addr1": {"load_store": weight_haddr}}
-def load_ha(act_haddr, act_laddr, nrows):
-    return {"op": Op.LOAD, "funct": {"load": LoadFunct.HOST_ACT}, "reps": nrows, "addr1": {"load_store": act_haddr}, "addr2": act_laddr}
-def load_w(wsel=0): return {"op": Op.MOVE, "funct": {"move": MoveFunct.PRELOAD_WEIGHT}, "opt": {"acc_wsel": {"wsel": wsel}}}
-def spad_sync(): return {"op": Op.SPAD_SYNC}
-def preload_sync(): return {"op": Op.PRELOAD_SYNC}
-def matmul_sync(): return {"op": Op.MATMUL_SYNC}
-def nop(): return {"op": Op.NOP}
-def matmul(act_addr, acc_addr, nrows, wsel=0, acc=0):
-    return {"op": Op.MATMUL, "addr1": {"move_exec": acc_addr}, "addr2": act_addr, "reps": nrows, "opt": {"acc_wsel": {"wsel": wsel, "acc": acc}}}
-def activate(act_addr, acc_addr, nrows, actfn=Activation.RELU):
-    return {"op": Op.MOVE, "funct": {"move": MoveFunct.ACTIVATE}, "addr1": {"move_exec": acc_addr}, "addr2": act_addr, "reps": nrows,
-        "opt": {"actfn": actfn}}
-def store(act_haddr, act_laddr, nrows):
-    return {"op": Op.STORE, "reps": nrows, "addr1": {"load_store": act_haddr}, "addr2": act_laddr}
+    # print("exp:")
+    # print(expected)
+    # for row in expected:
+    #     print(hex(packed(row.tolist(), config.act_dtype.width))[2:])
+
+    # a_words, b_words = reshape_for_matmul(a, b, config)
+    # a_bytes = pack_activations(a, config)
+    # b_bytes = pack_weights(b, config)
+    # c_bytes = pack_bias(c, config)
+    # nblocks = -(-n // config.cols)
+    # pexp = np.pad(expected, ((0, 0), (0, nblocks * config.cols - n))).reshape(m, nblocks, config.cols).transpose(1, 0, 2).reshape(-1, config.cols)
+    # expected_words = [word for row in pexp.tolist() for word in repack(row, config.act_dtype.width, config.host_data_width)]
+    return pack_activations(a, config), pack_weights(b, config), pack_bias(c, config), actfn, zd, shamt, qmul, expected
 
 def batched(n, m):
     q, r = divmod(n, m)
     return [m] * q + ([r] if r else [])
 
-def tpu_matmul(m, k, n, tpu_conf, actfn=Activation.RELU, act_haddr=0, weight_haddr=0, d_haddr=0):
-    mblocks = -(-m // tpu_conf.acc_mem_depth)
+def tpu_matmul(m, k, n, tpu_conf, output_zp, shamt, qmul, actfn=Activation.RELU, a_haddr=0, b_haddr=0, c_haddr=0, d_haddr=0):
+    bias_laddr = tpu_conf.acc_mem_depth - 1
+    mblocks = -(-m // (tpu_conf.acc_mem_depth - 1))
     nblocks = -(-n // tpu_conf.cols)
     kblocks = -(-k // tpu_conf.rows)
 
     w_tile_bytes = -(-tpu_conf.weight_dtype.width * tpu_conf.cols // tpu_conf.host_data_width) * tpu_conf.rows * tpu_conf.host_data_width // 8
-    act_row_bytes = -(-tpu_conf.rows * tpu_conf.act_dtype.width // tpu_conf.host_data_width) * tpu_conf.host_data_width // 8
+    bias_row_bytes = -(-tpu_conf.acc_dtype.width * tpu_conf.cols // tpu_conf.host_data_width) * tpu_conf.host_data_width // 8
+    act_row_bytes = -(-tpu_conf.act_dtype.width * tpu_conf.rows // tpu_conf.host_data_width) * tpu_conf.host_data_width // 8
 
-    program = []
+    program = [scaler_config(qmul, shamt, output_zp)]
     st_act_offset = 0
     for j in range(nblocks):
         ld_act_offset = 0
+        program += [load_hb(c_haddr + j * bias_row_bytes, bias_laddr, 1)]
         for k in range(mblocks):
-            nrows = tpu_conf.acc_mem_depth if k < mblocks - 1 else m - k * tpu_conf.acc_mem_depth
+            nrows = (tpu_conf.acc_mem_depth - 1) if k < mblocks - 1 else m - k * (tpu_conf.acc_mem_depth - 1)
             for i in range(kblocks):
                 program += [
-                    *[load_ha(act_haddr + ld_act_offset + i * tpu_conf.max_reps * act_row_bytes, i * tpu_conf.max_reps, rep)
+                    *[load_ha(a_haddr + ld_act_offset + i * tpu_conf.max_reps * act_row_bytes, i * tpu_conf.max_reps, rep)
                         for i, rep in enumerate(batched(nrows, tpu_conf.max_reps))],
-                    load_hw(weight_haddr + (i * w_tile_bytes + j * w_tile_bytes * kblocks), tpu_conf.rows),
+                    load_hw(b_haddr + (i * w_tile_bytes + j * w_tile_bytes * kblocks), tpu_conf.rows),
+                    matmul_sync(), #NOTE: wsel is not yet supported
                     load_w(),
                     spad_sync(),
                     preload_sync(),
+                    acc_sync(),
                 ]
-                program.extend([matmul(ii * tpu_conf.max_reps, ii * tpu_conf.max_reps, rep, acc=i > 0)
+                acc_mode = AccMode.CONST if i == 0 else AccMode.SAME
+                acc_raddr = bias_laddr if i == 0 else 0
+                program.extend([matmul(waddr := ii * tpu_conf.max_reps, waddr, acc_raddr, rep, acc=acc_mode)
                     for ii, rep in enumerate(batched(nrows, tpu_conf.max_reps))])
                 ld_act_offset += act_row_bytes * nrows
             program += [
-                matmul_sync(),
+                acc_sync(),
                 *[activate(i * tpu_conf.max_reps, i * tpu_conf.max_reps, rep, actfn=actfn) for i, rep in enumerate(batched(nrows, tpu_conf.max_reps))],
                 spad_sync(),
                 *[store(d_haddr + st_act_offset + i * tpu_conf.max_reps * act_row_bytes, i * tpu_conf.max_reps, rep)

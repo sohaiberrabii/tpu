@@ -45,3 +45,6 @@ fpga/build
 *.log
 /.Xil
 
+# examples
+/data
+/examples/build

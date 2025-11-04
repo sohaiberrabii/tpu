@@ -4,16 +4,17 @@ from amaranth.lib.memory import Memory
 from amaranth.lib import data, stream
 from amaranth.utils import exact_log2, ceil_log2
 
+from naccel.isa import AccMode
 
 class Accumulator(Component):
     def __init__(self, depth, width):
         self.width, self.depth, addr_width = width, depth, exact_log2(depth)
-        write_payload_shape = data.StructLayout({"addr": addr_width, "data": width, "acc": 1})
-        self.write_q = am.Signal(data.StructLayout({"valid": 1, "payload": write_payload_shape}))
+        self.write_q = am.Signal(data.StructLayout({"valid": 1, "waddr": addr_width, "data": width, "acc": AccMode}))
         self.resp_q = am.Signal(data.StructLayout({"valid": 1, "payload": width}))
 
         super().__init__({
-            "write": In(stream.Signature(write_payload_shape, always_ready=True)),
+            "write": In(stream.Signature(data.StructLayout({
+                "waddr": addr_width, "raddr": addr_width, "data": width, "acc": AccMode}), always_ready=True)),
             "read": Out(Signature({
                 "req": In(stream.Signature(data.StructLayout({"addr": addr_width}))),
                 "resp": Out(stream.Signature(data.StructLayout({"data": width}))),
@@ -22,18 +23,24 @@ class Accumulator(Component):
 
     def elaborate(self, _):
         m = am.Module()
-        m.d.sync += [self.write_q.valid.eq(self.write.valid), self.write_q.payload.eq(self.write.payload)]
+        m.d.sync += [
+            self.write_q.valid.eq(self.write.valid),
+            self.write_q.waddr.eq(self.write.payload.waddr),
+            self.write_q.data.eq(self.write.payload.data),
+            self.write_q.acc.eq(self.write.payload.acc),
+        ]
 
         m.submodules.mem = self.mem = Memory(shape=self.width, depth=self.depth, init=[])
         wr_port = self.mem.write_port()
         rd_port = self.mem.read_port()
 
-        acc_write = self.write.valid & self.write.payload.acc
+        acc_write = self.write.valid & (self.write.payload.acc != AccMode.NO)
         ren = acc_write | (self.read.req.valid & self.read.req.ready)
-        raddr = am.Mux(acc_write, self.write.payload.addr, self.read.req.payload.addr)
+        raddr = am.Mux(acc_write, am.Mux(
+            self.write.payload.acc == AccMode.SAME, self.write.payload.waddr, self.write.payload.raddr), self.read.req.payload.addr)
 
         wen = self.write_q.valid
-        waddr = self.write_q.payload.addr
+        waddr = self.write_q.waddr
 
         same_addr_rdw = am.Signal(1)
         wdata_q = am.Signal.like(wr_port.data)
@@ -61,10 +68,10 @@ class Accumulator(Component):
             m.d.sync += self.resp_q.valid.eq(0)
 
         if isinstance(self.width, data.ArrayLayout):
-            acc_data = am.Cat((x + y)[:self.width.elem_shape.width] for x, y in zip(rdata, self.write_q.payload.data))
+            acc_data = am.Cat((x + y)[:self.width.elem_shape.width] for x, y in zip(rdata, self.write_q.data))
         else:
-            acc_data = rdata + self.write_q.payload.data
-        wdata = am.Mux(self.write_q.payload.acc, acc_data, self.write_q.payload.data)
+            acc_data = rdata + self.write_q.data
+        wdata = am.Mux(self.write_q.acc != AccMode.NO, acc_data, self.write_q.data)
         m.d.comb += [wr_port.en.eq(wen), wr_port.data.eq(wdata), wr_port.addr.eq(waddr)]
         return m
 

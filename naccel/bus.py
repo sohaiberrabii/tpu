@@ -257,48 +257,46 @@ class DMAWriter(Component):
 class Deserializer(Component):
     def __init__(self, *, src_width, dst_width):
         self.nbeats = -(-dst_width // src_width)
-        self.siporeg = am.Signal(data.ArrayLayout(src_width, self.nbeats - 1))
-        self.beat_counter = am.Signal(range(self.nbeats))
+        self.siporeg = am.Signal(data.ArrayLayout(src_width, self.nbeats))
+        self.beat_counter = am.Signal(range(self.nbeats + 1))
         super().__init__({"src": In(stream.Signature(src_width)), "dst": Out(stream.Signature(dst_width))})
 
     def elaborate(self, _):
         m = am.Module()
         
-        last_beat = self.beat_counter == self.nbeats - 1
+        done = self.beat_counter == self.nbeats
 
         with m.If(self.src.valid & self.src.ready):
             m.d.sync += [
-                self.beat_counter.eq(self.beat_counter + 1),
+                self.beat_counter.eq(am.Mux(done, 1, self.beat_counter + 1)),
                 self.siporeg.eq(am.Cat(self.siporeg[1:], self.src.payload)),
             ]
+        with m.Elif(self.dst.valid & self.dst.ready):
+            m.d.sync += self.beat_counter.eq(0)
 
         m.d.comb += [
-            self.src.ready.eq(~last_beat | self.dst.ready),
-            self.dst.valid.eq(self.src.valid & self.src.ready & last_beat),
-            self.dst.payload.eq(am.Cat(self.siporeg, self.src.payload)),
+            self.src.ready.eq(~done | self.dst.ready),
+            self.dst.valid.eq(done),
+            self.dst.payload.eq(self.siporeg),
         ]
         return m
 
 class DMAReader(Component):
-    def __init__(self, *, addr_width, data_width, size, max_repeats, lastctrl=True):
+    def __init__(self, *, addr_width, data_width, size, max_repeats):
         self.nbeats = -(-size // data_width)
 
-        self.lastctrl = lastctrl
         self.shamt = exact_log2(self.nbeats)
         self.deserializer = Deserializer(src_width=data_width, dst_width=size)
 
         super().__init__({
             "req": In(stream.Signature(data.StructLayout({"addr": addr_width, "reps": ceil_log2(max_repeats + 1)}))),
-            "resp": Out(stream.Signature(data.StructLayout({"data": size, "last": 1}) if lastctrl else size)),
+            "resp": Out(stream.Signature(size)),
             "bus": Out(Signature(addr_width=addr_width, data_width=data_width)),
         })
         assert ceil_log2(max_repeats << self.shamt) <= len(self.bus.arlen), f"{max_repeats}, {self.shamt}, {len(self.bus.arlen)}"
 
     def elaborate(self, _):
         m = am.Module()
-        
-        if self.lastctrl:
-            m.d.comb += self.resp.payload.last.eq(self.bus.rlast)
 
         m.submodules.deserializer = self.deserializer
         m.d.comb += [

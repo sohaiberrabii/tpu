@@ -1,0 +1,79 @@
+[
+  {
+    "op": "flatten",
+    "args": [
+      1,
+      -1
+    ]
+  },
+  {
+    "op": "fully_connected",
+    "qparams": {
+      "output_zp": -128,
+      "qmul": 1945668480,
+      "shamt": 41
+    },
+    "args": {
+      "weight": {
+        "offset": 0,
+        "shape": [
+          144,
+          18
+        ],
+        "size": 3456,
+        "dtype": {
+          "width": 8,
+          "signed": true
+        }
+      },
+      "bias": {
+        "offset": 3456,
+        "shape": [
+          1,
+          18
+        ],
+        "size": 96,
+        "dtype": {
+          "width": 32,
+          "signed": true
+        }
+      }
+    },
+    "act": "RELU"
+  },
+  {
+    "op": "fully_connected",
+    "qparams": {
+      "output_zp": 28,
+      "qmul": 1811200128,
+      "shamt": 39
+    },
+    "args": {
+      "weight": {
+        "offset": 3552,
+        "shape": [
+          18,
+          10
+        ],
+        "size": 384,
+        "dtype": {
+          "width": 8,
+          "signed": true
+        }
+      },
+      "bias": {
+        "offset": 3936,
+        "shape": [
+          1,
+          10
+        ],
+        "size": 64,
+        "dtype": {
+          "width": 32,
+          "signed": true
+        }
+      }
+    },
+    "act": "NONE"
+  }
+]
