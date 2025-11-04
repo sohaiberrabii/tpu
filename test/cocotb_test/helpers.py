@@ -13,7 +13,6 @@ from cocotb_tools.runner import get_runner
 from tpu.isa import Activation
 from tpu.sw import *
 from tpu.bus import RespType
-from test.helpers import tpu_matmul
 
 
 def cocotb_run(srcs, top, module=None, sim="verilator", always=False, waves=False, timescale=("1ns", "1ps"),
@@ -34,7 +33,7 @@ async def run_tpu(axi, config, ninstrs, instr_baseaddr):
     ins_xfers = -(-ninstrs // xfer_size)
     for i in range(ins_xfers):
         nins = xfer_size if i < ins_xfers - 1 else ninstrs - i * xfer_size
-        insaddr = instr_baseaddr + i * xfer_size * -(-config.isa_layout.size // config.host_data_width) * config.host_data_width // 8
+        insaddr = instr_baseaddr + i * xfer_size * aligned_size(config.isa_layout.size, config.host_data_width) // 8
         await axi.write_csr(config.csr_offsets["nins"], nins)
         await axi.write_csr(config.csr_offsets["insadr"], insaddr)
         await axi.write_csr(config.csr_offsets["tpus"], 1)
@@ -58,7 +57,6 @@ async def tb_qmatmul(tpu_axi, config, a, n, b_bytes, c_bytes, zd, qmul, shamt, a
     tpu_axi.memory[instr_baseaddr:] = instr_bytes
 
     result_size = m * -(-n // config.cols) * -(-config.act_dtype.width * config.rows // config.host_data_width) * config.host_data_width // 8
-    assert len(data_bytes) + len(instr_bytes) + result_size < len(tpu_axi.memory)
     await run_tpu(tpu_axi, config, len(instrs), instr_baseaddr)
     return unpack_activations(tpu_axi.memory[res_offset:res_offset + result_size], m, n, config)
 

@@ -67,5 +67,5 @@ if __name__ == '__main__':
     from tpu.tpu import TPUConfig
     config = TPUConfig(rows=8, cols=8, max_reps=15, instr_fifo_depth=32, act_mem_depth=32, acc_mem_depth=32, host_data_width=64, weight_fifo_depth=16)
     generate_bitstream(config)
-    with open("fpga/build/config.json", "w") as f:
+    with open(Path(__file__).parent / "build/config.json", "w") as f:
         json.dump(asdict(config), f, indent=4)

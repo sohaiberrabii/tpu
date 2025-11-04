@@ -3,9 +3,9 @@ import random
 import numpy as np
 from amaranth.sim import Simulator, Period
 
-from tpu.isa import *
-from tpu.sw import *
+from tpu.isa import Activation
 from tpu.tpu import IntType
+from tpu.sw import dtype_to_bounds, pack_activations, pack_bias, pack_weights, qmatmul
 
 def run_sim(dut, tb, processes=[], comb=False, vcdfn=None):
     sim = Simulator(dut)
@@ -36,50 +36,3 @@ def matmul_case(m, k, n, config):
     qmul  = np.random.randint(0, dtype_to_bounds(c_dtype)[1], size=(1,))
     expected = qmatmul(a, b, c, zd, qmul, shamt, a_dtype, c_dtype, actfn=actfn)
     return pack_activations(a, config), pack_weights(b, config), pack_bias(c, config), actfn, zd, shamt, qmul, expected
-
-def batched(n, m):
-    q, r = divmod(n, m)
-    return [m] * q + ([r] if r else [])
-
-def tpu_matmul(m, k, n, tpu_conf, output_zp, shamt, qmul, actfn=Activation.RELU, a_haddr=0, b_haddr=0, c_haddr=0, d_haddr=0):
-    bias_laddr = tpu_conf.acc_mem_depth - 1
-    mblocks = ceildiv(m, tpu_conf.acc_mem_depth - 1)
-    nblocks = ceildiv(n, tpu_conf.cols)
-    kblocks = ceildiv(k, tpu_conf.rows)
-    w_tile_bytes = aligned_size(tpu_conf.weight_dtype.width * tpu_conf.cols, tpu_conf.host_data_width) * tpu_conf.rows // 8
-    bias_row_bytes = aligned_size(tpu_conf.acc_dtype.width * tpu_conf.cols, tpu_conf.host_data_width) // 8
-    act_row_bytes = aligned_size(tpu_conf.act_dtype.width * tpu_conf.rows, tpu_conf.host_data_width) // 8
-
-    program = [scaler_config(qmul, shamt, output_zp)]
-    st_act_offset = 0
-    for j in range(nblocks):
-        ld_act_offset = 0
-        program += [load_hb(c_haddr + j * bias_row_bytes, bias_laddr, 1)]
-        for k in range(mblocks):
-            nrows = (tpu_conf.acc_mem_depth - 1) if k < mblocks - 1 else m - k * (tpu_conf.acc_mem_depth - 1)
-            for i in range(kblocks):
-                program += [
-                    *[load_ha(a_haddr + ld_act_offset + i * tpu_conf.max_reps * act_row_bytes, i * tpu_conf.max_reps, rep)
-                        for i, rep in enumerate(batched(nrows, tpu_conf.max_reps))],
-                    load_hw(b_haddr + (i * w_tile_bytes + j * w_tile_bytes * kblocks), tpu_conf.rows),
-                    matmul_sync(), #NOTE: wsel is not yet supported
-                    load_w(),
-                    spad_sync(),
-                    preload_sync(),
-                    acc_sync(),
-                ]
-                acc_mode = AccMode.CONST if i == 0 else AccMode.SAME
-                acc_raddr = bias_laddr if i == 0 else 0
-                program.extend([matmul(waddr := ii * tpu_conf.max_reps, waddr, acc_raddr, rep, acc=acc_mode)
-                    for ii, rep in enumerate(batched(nrows, tpu_conf.max_reps))])
-                ld_act_offset += act_row_bytes * nrows
-            program += [
-                acc_sync(),
-                *[activate(i * tpu_conf.max_reps, i * tpu_conf.max_reps, rep, actfn=actfn) for i, rep in enumerate(batched(nrows, tpu_conf.max_reps))],
-                spad_sync(),
-                *[store(d_haddr + st_act_offset + i * tpu_conf.max_reps * act_row_bytes, i * tpu_conf.max_reps, rep)
-                    for i, rep in enumerate(batched(nrows, tpu_conf.max_reps))],
-                spad_sync(),
-            ]
-            st_act_offset += act_row_bytes * nrows
-    return program + [nop()]

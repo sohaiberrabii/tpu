@@ -8,7 +8,7 @@ import functools
 import json
 import numpy as np
 
-from tpu.isa import Activation
+from tpu.isa import *
 
 def ceildiv(a, b): return -(-a // b)
 def aligned_size(src, dst): return ceildiv(src, dst) * dst
@@ -31,6 +31,53 @@ def packed(vals, width):
 def repack(vals, src_width, target_width, aligned=False):
     aligned_width = aligned_size(src_width, target_width) if aligned else src_width
     return unpacked(packed(vals, aligned_width), len(vals) * aligned_width, target_width)
+
+def batched(n, m):
+    q, r = divmod(n, m)
+    return [m] * q + ([r] if r else [])
+
+def tpu_matmul(m, k, n, tpu_conf, output_zp, shamt, qmul, actfn=Activation.RELU, a_haddr=0, b_haddr=0, c_haddr=0, d_haddr=0):
+    bias_laddr = tpu_conf.acc_mem_depth - 1
+    mblocks = ceildiv(m, tpu_conf.acc_mem_depth - 1)
+    nblocks = ceildiv(n, tpu_conf.cols)
+    kblocks = ceildiv(k, tpu_conf.rows)
+    w_tile_bytes = aligned_size(tpu_conf.weight_dtype.width * tpu_conf.cols, tpu_conf.host_data_width) * tpu_conf.rows // 8
+    bias_row_bytes = aligned_size(tpu_conf.acc_dtype.width * tpu_conf.cols, tpu_conf.host_data_width) // 8
+    act_row_bytes = aligned_size(tpu_conf.act_dtype.width * tpu_conf.rows, tpu_conf.host_data_width) // 8
+
+    program = [scaler_config(qmul, shamt, output_zp)]
+    st_act_offset = 0
+    for j in range(nblocks):
+        ld_act_offset = 0
+        program += [load_hb(c_haddr + j * bias_row_bytes, bias_laddr, 1)]
+        for k in range(mblocks):
+            nrows = (tpu_conf.acc_mem_depth - 1) if k < mblocks - 1 else m - k * (tpu_conf.acc_mem_depth - 1)
+            for i in range(kblocks):
+                program += [
+                    *[load_ha(a_haddr + ld_act_offset + i * tpu_conf.max_reps * act_row_bytes, i * tpu_conf.max_reps, rep)
+                        for i, rep in enumerate(batched(nrows, tpu_conf.max_reps))],
+                    load_hw(b_haddr + (i * w_tile_bytes + j * w_tile_bytes * kblocks), tpu_conf.rows),
+                    matmul_sync(), #NOTE: wsel is not yet supported
+                    load_w(),
+                    spad_sync(),
+                    preload_sync(),
+                    acc_sync(),
+                ]
+                acc_mode = AccMode.CONST if i == 0 else AccMode.SAME
+                acc_raddr = bias_laddr if i == 0 else 0
+                program.extend([matmul(waddr := ii * tpu_conf.max_reps, waddr, acc_raddr, rep, acc=acc_mode)
+                    for ii, rep in enumerate(batched(nrows, tpu_conf.max_reps))])
+                ld_act_offset += act_row_bytes * nrows
+            program += [
+                acc_sync(),
+                *[activate(i * tpu_conf.max_reps, i * tpu_conf.max_reps, rep, actfn=actfn) for i, rep in enumerate(batched(nrows, tpu_conf.max_reps))],
+                spad_sync(),
+                *[store(d_haddr + st_act_offset + i * tpu_conf.max_reps * act_row_bytes, i * tpu_conf.max_reps, rep)
+                    for i, rep in enumerate(batched(nrows, tpu_conf.max_reps))],
+                spad_sync(),
+            ]
+            st_act_offset += act_row_bytes * nrows
+    return program + [nop()]
 
 def qparams(float_range, int_dtype, symmetric=False):
     float_range = float_range if isinstance(float_range[0], Iterable) else [float_range]
@@ -65,8 +112,8 @@ def pack_activations(a, config):
 
 def unpack_activations(dat, m, n, config):
     nblocks = ceildiv(n, config.cols)
-    act_tile_row_words = aligned_size(config.act_dtype.width * config.rows, config.host_data_width) // 8
-    acts = np.array([v for row in dat.reshape(-1, act_tile_row_words)
+    act_tile_row_size = aligned_size(config.act_dtype.width * config.rows, config.host_data_width) // 8
+    acts = np.array([v for row in dat.reshape(-1, act_tile_row_size)
         for v in signed_unpack(packed(row.tolist(), 8), config.act_dtype.width * config.cols, config.act_dtype)],
         dtype=config.act_dtype.numpy)
     return acts.reshape(nblocks, m, config.rows).transpose(1, 0, 2).reshape(m, -1)[:m, :n]
