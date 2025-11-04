@@ -10,6 +10,9 @@ import numpy as np
 
 from tpu.isa import Activation
 
+def ceildiv(a, b): return -(-a // b)
+def aligned_size(src, dst): return ceildiv(src, dst) * dst
+
 def dtype_to_bounds(dt):
     return (-1 << dt.width - 1, (1 << dt.width - 1) - 1) if dt.signed else (0, (1 << dt.width) - 1)
 
@@ -26,7 +29,7 @@ def packed(vals, width):
     return functools.reduce(operator.or_, map(lambda x: (x[1] & ((1 << width) - 1)) << x[0] * width, enumerate(vals)))
 
 def repack(vals, src_width, target_width, aligned=False):
-    aligned_width = -(-src_width // target_width) * target_width if aligned else src_width
+    aligned_width = aligned_size(src_width, target_width) if aligned else src_width
     return unpacked(packed(vals, aligned_width), len(vals) * aligned_width, target_width)
 
 def qparams(float_range, int_dtype, symmetric=False):
@@ -52,7 +55,7 @@ def quantize_multiplier(x):
 def pack_activations(a, config):
     m, k = a.shape
     mrows = config.acc_mem_depth - 1
-    kblocks = -(-k // config.rows)
+    kblocks = ceildiv(k, config.rows)
     padded = np.pad(a, ((0, 0), (0, kblocks * config.rows - k))).reshape(-1, kblocks, config.rows)
     reshaped = np.concatenate([
         padded[:(m // mrows) * mrows].reshape(-1, mrows, kblocks, config.rows).transpose(0, 2, 1, 3).reshape(-1, config.rows),
@@ -61,8 +64,8 @@ def pack_activations(a, config):
     return [byte for word in words for byte in unpacked(word, config.host_data_width, 8)]
 
 def unpack_activations(dat, m, n, config):
-    nblocks = -(-n // config.cols)
-    act_tile_row_words = -(-config.act_dtype.width * config.rows // config.host_data_width) * config.host_data_width // 8
+    nblocks = ceildiv(n, config.cols)
+    act_tile_row_words = aligned_size(config.act_dtype.width * config.rows, config.host_data_width) // 8
     acts = np.array([v for row in dat.reshape(-1, act_tile_row_words)
         for v in signed_unpack(packed(row.tolist(), 8), config.act_dtype.width * config.cols, config.act_dtype)],
         dtype=config.act_dtype.numpy)
@@ -70,15 +73,15 @@ def unpack_activations(dat, m, n, config):
 
 def pack_weights(w, config):
     k, n = w.shape
-    kblocks, nblocks = -(-k // config.rows), -(-n // config.cols)
+    kblocks, nblocks = ceildiv(k, config.rows), ceildiv(n, config.cols)
     padded = np.pad(w, ((0, kblocks * config.rows - k), (0, nblocks * config.cols - n))).reshape(kblocks, config.rows, nblocks, config.cols)
     flipped = np.flip(padded, axis=1).transpose(2, 0, 1, 3).reshape(-1, config.cols)
     words = [word for row in flipped.tolist() for word in repack(row, config.weight_dtype.width, config.host_data_width)]
     return [byte for word in words for byte in unpacked(word, config.host_data_width, 8)]
 
 def unpack_weights(dat, k, n, config):
-    kblocks, nblocks = -(-k // config.rows), -(-n // config.cols)
-    weight_tile_row_size = -(-config.weight_dtype.width * config.cols // config.host_data_width) * config.host_data_width // 8
+    kblocks, nblocks = ceildiv(k, config.rows), ceildiv(n, config.cols)
+    weight_tile_row_size = aligned_size(config.weight_dtype.width * config.cols, config.host_data_width) // 8
     w = np.array([v for row in dat.reshape(-1, weight_tile_row_size) 
         for v in signed_unpack(packed(row.tolist(), 8), config.weight_dtype.width * config.cols, config.weight_dtype)],
         dtype=config.weight_dtype.numpy)
@@ -87,14 +90,14 @@ def unpack_weights(dat, k, n, config):
 
 def pack_bias(c, config):
     _, n = c.shape
-    nblocks = -(-n // config.cols)
+    nblocks = ceildiv(n, config.cols)
     padded = np.pad(c, ((0, 0), (0, nblocks * config.cols - n))).reshape(nblocks, config.cols)
     words = [word for row in padded.tolist() for word in repack(row, config.acc_dtype.width, config.host_data_width)]
     return [byte for word in words for byte in unpacked(word, config.host_data_width, 8)]
 
 def unpack_bias(dat, n, config):
-    nblocks = -(-n // config.cols)
-    bias_tile_row_size = -(-config.acc_dtype.width * config.cols // config.host_data_width) * config.host_data_width // 8
+    nblocks = ceildiv(n, config.cols)
+    bias_tile_row_size = aligned_size(config.acc_dtype.width * config.cols, config.host_data_width) // 8
     bias = np.array([v for row in dat.reshape(-1, bias_tile_row_size) 
         for v in signed_unpack(packed(row.tolist(), 8), config.acc_dtype.width * config.cols, config.acc_dtype)],
         dtype=config.acc_dtype.numpy)

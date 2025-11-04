@@ -32,7 +32,7 @@ def matmul_case(m, k, n, config):
 
     actfn = random.choice(list(Activation))
     zd    = random.randint(*a_bounds)
-    shamt = np.random.randint(30, c_dtype.width * 2 - 1, size=(1,))
+    shamt = np.random.randint(0, c_dtype.width * 2 - 1, size=(1,))
     qmul  = np.random.randint(0, dtype_to_bounds(c_dtype)[1], size=(1,))
     expected = qmatmul(a, b, c, zd, qmul, shamt, a_dtype, c_dtype, actfn=actfn)
     return pack_activations(a, config), pack_weights(b, config), pack_bias(c, config), actfn, zd, shamt, qmul, expected
@@ -43,13 +43,12 @@ def batched(n, m):
 
 def tpu_matmul(m, k, n, tpu_conf, output_zp, shamt, qmul, actfn=Activation.RELU, a_haddr=0, b_haddr=0, c_haddr=0, d_haddr=0):
     bias_laddr = tpu_conf.acc_mem_depth - 1
-    mblocks = -(-m // (tpu_conf.acc_mem_depth - 1))
-    nblocks = -(-n // tpu_conf.cols)
-    kblocks = -(-k // tpu_conf.rows)
-
-    w_tile_bytes = -(-tpu_conf.weight_dtype.width * tpu_conf.cols // tpu_conf.host_data_width) * tpu_conf.rows * tpu_conf.host_data_width // 8
-    bias_row_bytes = -(-tpu_conf.acc_dtype.width * tpu_conf.cols // tpu_conf.host_data_width) * tpu_conf.host_data_width // 8
-    act_row_bytes = -(-tpu_conf.act_dtype.width * tpu_conf.rows // tpu_conf.host_data_width) * tpu_conf.host_data_width // 8
+    mblocks = ceildiv(m, tpu_conf.acc_mem_depth - 1)
+    nblocks = ceildiv(n, tpu_conf.cols)
+    kblocks = ceildiv(k, tpu_conf.rows)
+    w_tile_bytes = aligned_size(tpu_conf.weight_dtype.width * tpu_conf.cols, tpu_conf.host_data_width) * tpu_conf.rows // 8
+    bias_row_bytes = aligned_size(tpu_conf.acc_dtype.width * tpu_conf.cols, tpu_conf.host_data_width) // 8
+    act_row_bytes = aligned_size(tpu_conf.act_dtype.width * tpu_conf.rows, tpu_conf.host_data_width) // 8
 
     program = [scaler_config(qmul, shamt, output_zp)]
     st_act_offset = 0
