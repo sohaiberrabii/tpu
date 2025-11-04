@@ -48,3 +48,4 @@ fpga/build
 # examples
 /data
 /examples/build
+/examples/assets

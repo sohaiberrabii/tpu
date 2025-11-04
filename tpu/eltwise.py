@@ -3,7 +3,7 @@ from amaranth.lib import data, stream
 from amaranth.lib.wiring import In, Out, Component
 from amaranth.utils import ceil_log2
 
-from naccel.isa import Activation
+from tpu.isa import Activation
 
 
 def clip(x, min, max):

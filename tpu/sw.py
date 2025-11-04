@@ -8,7 +8,7 @@ import functools
 import json
 import numpy as np
 
-from naccel.isa import Activation
+from tpu.isa import Activation
 
 def dtype_to_bounds(dt):
     return (-1 << dt.width - 1, (1 << dt.width - 1) - 1) if dt.signed else (0, (1 << dt.width) - 1)

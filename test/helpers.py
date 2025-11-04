@@ -3,9 +3,9 @@ import random
 import numpy as np
 from amaranth.sim import Simulator, Period
 
-from naccel.isa import *
-from naccel.sw import *
-from naccel.tpu import IntType
+from tpu.isa import *
+from tpu.sw import *
+from tpu.tpu import IntType
 
 def run_sim(dut, tb, processes=[], comb=False, vcdfn=None):
     sim = Simulator(dut)

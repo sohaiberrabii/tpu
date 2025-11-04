@@ -6,14 +6,14 @@ from amaranth.lib import data, fifo
 from amaranth.utils import ceil_log2, exact_log2
 from amaranth_soc import csr
 
-from naccel.pe import PE, SystolicDelay
-from naccel.controller import ExecuteController, PreloadController, ActivationController, LoadController, StoreController
-from naccel.memory import Scratchpad, Accumulator, FixedPriorityArbiter
-from naccel.isa import ISALayout, AccMode
-from naccel.decoder import InstructionDecoder
-from naccel import bus
-from naccel.bus import DMAReader, DMAWriter, Arbiter, AXI4Lite, AXI4LiteCSRBridge
-from naccel.eltwise import ActivationUnit
+from tpu.pe import PE, SystolicDelay
+from tpu.controller import ExecuteController, PreloadController, ActivationController, LoadController, StoreController
+from tpu.memory import Scratchpad, Accumulator, FixedPriorityArbiter
+from tpu.isa import ISALayout, AccMode
+from tpu.decoder import InstructionDecoder
+from tpu import bus
+from tpu.bus import DMAReader, DMAWriter, Arbiter, AXI4Lite, AXI4LiteCSRBridge
+from tpu.eltwise import ActivationUnit
 
 
 @dataclass(frozen=True)

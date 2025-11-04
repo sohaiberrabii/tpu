@@ -13,11 +13,12 @@ import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 
-from naccel.sw import *
-from naccel.tpu import IntType, TPUConfig, TPU
+from tpu.sw import *
+from tpu.tpu import IntType, TPUConfig, TPU
 from test.cocotb_test.helpers import CocotbModel, TPUAxiInterface, cocotb_run
 
 ASSETDIR = Path(__file__).parent / "assets"
+ASSETDIR.mkdir(exist_ok=True)
 
 class SimpleNN(nn.Module):
     def __init__(self):

@@ -3,7 +3,7 @@ import amaranth as am
 from amaranth.lib.wiring import In, Out, Component
 from amaranth.lib import data
 
-from naccel.helpers import Shifter
+from tpu.helpers import Shifter
 
 class PE(Component):
     def __init__(self, a_shape, b_shape, c_shape, latency=0):

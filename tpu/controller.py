@@ -3,8 +3,8 @@ from amaranth.lib.wiring import In, Out, Component
 from amaranth.lib import stream, data
 from amaranth.utils import ceil_log2
 
-from naccel.isa import Activation, AccMode
-from naccel.helpers import Shifter
+from tpu.isa import Activation, AccMode
+from tpu.helpers import Shifter
 
 class Request(data.StructLayout):
     def __init__(self, src_addr_width, dst_addr_width, max_repeats, extra=None):

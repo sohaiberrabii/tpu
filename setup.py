@@ -1,7 +1,7 @@
 from setuptools import setup, find_packages
 
 setup(
-    name="naccel",
+    name="tpu",
     version="0.1.0",
     author="Sohaib Errabii",
     author_email="sohaib.errabii@inria.fr",

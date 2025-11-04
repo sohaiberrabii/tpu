@@ -3,10 +3,10 @@ import numpy as np
 import pynq as pq
 from pynq.overlay import Overlay
 
-from naccel.tpu import TPUConfig
-from naccel.isa import Activation
+from tpu.tpu import TPUConfig
+from tpu.isa import Activation
 # from test.helpers import repack, packed, unpacked, reshape_for_matmul, tpu_matmul
-from naccel.isa import Activation, Op, LoadFunct, MoveFunct
+from tpu.isa import Activation, Op, LoadFunct, MoveFunct
 import operator
 import functools
 

@@ -3,9 +3,9 @@ from amaranth.lib import stream, data
 from amaranth.lib.wiring import In, Out, Component
 from amaranth.utils import ceil_log2
 
-from naccel.isa import Op, ISALayout, LoadFunct, MoveFunct
-from naccel.controller import ActivationRequest, Request, ExecuteRequest
-from naccel.eltwise import ScalerConfig
+from tpu.isa import Op, ISALayout, LoadFunct, MoveFunct
+from tpu.controller import ActivationRequest, Request, ExecuteRequest
+from tpu.eltwise import ScalerConfig
 
 class InstructionDecoder(Component):
     def __init__(self, act_shape, acc_shape, haddr_width, sp_addr_width, acc_addr_width, max_repeats, acc_max_repeats):

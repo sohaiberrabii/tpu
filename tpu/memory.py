@@ -4,7 +4,7 @@ from amaranth.lib.memory import Memory
 from amaranth.lib import data, stream
 from amaranth.utils import exact_log2, ceil_log2
 
-from naccel.isa import AccMode
+from tpu.isa import AccMode
 
 class Accumulator(Component):
     def __init__(self, depth, width):

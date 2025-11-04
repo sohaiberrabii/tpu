@@ -1,7 +1,7 @@
 from functools import partial
 import pytest
 
-from naccel.tpu import TPU, TPUConfig
+from tpu.tpu import TPU, TPUConfig
 from test.helpers import *
 
 beats_remaining = 0
@@ -37,6 +37,7 @@ async def axis_w_process(ctx, bus, mem, data_width):
                 ctx.set(bus.bvalid, 1)
                 ctx.set(bus.bresp, 0)
 
+#FIXME: can't be stalled with rready
 async def axi4_r_process(ctx, bus, mem, data_width):
     ctx.set(bus.arready, 1)
     beat_bytes = data_width // 8

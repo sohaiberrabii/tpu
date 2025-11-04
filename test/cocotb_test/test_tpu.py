@@ -13,8 +13,8 @@ import cocotb
 
 from amaranth.back.verilog import convert
 
-from naccel.isa import Activation
-from naccel.tpu import TPU, TPUConfig
+from tpu.isa import Activation
+from tpu.tpu import TPU, TPUConfig
 from test.cocotb_test.helpers import cocotb_run, TPUAxiInterface, run_tpu
 from test.helpers import *
 

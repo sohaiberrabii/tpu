@@ -1,6 +1,4 @@
 import os
-import sys
-import urllib.request
 import tempfile
 import zipfile
 from pathlib import Path
@@ -12,35 +10,9 @@ from amaranth import Module
 from amaranth.lib import wiring
 from amaranth.back.verilog import convert
 from amaranth.lib import wiring
-from naccel.tpu import TPU
+from tpu.tpu import TPU
+from tpu.sw import fetch
 
-
-class tqdm:
-    def __init__(self, iterable=None, pbar_length=20, desc="", total=None, display=True):
-        self.desc, self.pbar_length, self.i, self.total, self.display = desc, pbar_length, 0, total or len(iterable), display
-        self.iterable = iterable
-    def __iter__(self):
-        for item in self.iterable:
-          yield item
-          self.update(1)
-        self.update(close=True)
-    def update(self, c=0, close=False):
-        self.i += c
-        percent = min(100, self.i * 100 // self.total)
-        filled = int(self.pbar_length * percent // 100)
-        if self.display:
-            print(f"\r{self.desc} [{'▰' * filled + '▱' * (self.pbar_length - filled)}] {percent}%", end='\n'*close, flush=True, file=sys.stderr)
-
-def fetch(url, fn=None, dstdir=None, pbar_width=20):
-    fp = Path(fn if fn is not None else Path(url).name)
-    if dstdir is not None: fp = Path(dstdir) / fp
-    if fp.is_file(): return fp
-    with urllib.request.urlopen(url) as r, open(fp, 'wb') as f:
-        assert r.status == 200, r.status
-        pbar = tqdm(total=int(r.headers.get('content-length', 0)), desc=f"Downloading {fp}", pbar_length=pbar_width)
-        while chunk := r.read(16384): pbar.update(f.write(chunk))
-        pbar.update(close=True)
-    return fp
 
 class InterfaceRenamer(wiring.Component):
     def __init__(self, dut):
@@ -92,7 +64,7 @@ def deploy(config_fn, bit_fn, hwh_fn, remote_dir=""):
 
 
 if __name__ == '__main__':
-    from naccel.tpu import TPUConfig
+    from tpu.tpu import TPUConfig
     config = TPUConfig(rows=8, cols=8, max_reps=15, instr_fifo_depth=32, act_mem_depth=32, acc_mem_depth=32, host_data_width=64, weight_fifo_depth=16)
     generate_bitstream(config)
     with open("fpga/build/config.json", "w") as f:

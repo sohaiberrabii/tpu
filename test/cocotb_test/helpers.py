@@ -10,9 +10,9 @@ from cocotb.handle import Immediate
 from cocotb.queue import Queue
 from cocotb_tools.runner import get_runner
 
-from naccel.isa import Activation
-from naccel.sw import *
-from naccel.bus import RespType
+from tpu.isa import Activation
+from tpu.sw import *
+from tpu.bus import RespType
 from test.helpers import tpu_matmul
 
 

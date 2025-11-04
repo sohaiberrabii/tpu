@@ -1,7 +1,7 @@
 import pytest
 
 
-from naccel.memory import Accumulator
+from tpu.memory import Accumulator
 from test.helpers import run_sim 
 
 
