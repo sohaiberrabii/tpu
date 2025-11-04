@@ -19,6 +19,7 @@ from test.cocotb_test.helpers import CocotbModel, TPUAxiInterface, cocotb_run
 
 ASSETDIR = Path(__file__).parent / "assets"
 ASSETDIR.mkdir(exist_ok=True)
+COCOTB = int(os.getenv("COCOTB", 0))
 
 class SimpleNN(nn.Module):
     def __init__(self):
@@ -228,11 +229,12 @@ if __name__ == "__main__":
     print(f"INT{config.act_dtype.width}: {correct}/{len(x_test)} correct predictions, {100.0 * correct / len(x_test):.2f}% accuracy")
 
     # generate the verilog and run cocotb simulation
-    dut = TPU(config)
-    builddir = Path(__file__).parent / "build"
-    builddir.mkdir(exist_ok=True)
-    with open(builddir / "tpu.v", 'w') as f:
-        f.write(convert(dut, name="TPU", emit_src=False, strip_internal_attrs=True))
-    with open(builddir / "config.json", "w") as f:
-        json.dump(asdict(config), f, indent=4)
-    cocotb_run([builddir / "tpu.v"], "TPU", waves=True, sim="verilator", module="mnist")
+    if COCOTB:
+        dut = TPU(config)
+        builddir = Path(__file__).parent / "build"
+        builddir.mkdir(exist_ok=True)
+        with open(builddir / "tpu.v", 'w') as f:
+            f.write(convert(dut, name="TPU", emit_src=False, strip_internal_attrs=True))
+        with open(builddir / "config.json", "w") as f:
+            json.dump(asdict(config), f, indent=4)
+        cocotb_run([builddir / "tpu.v"], "TPU", waves=True, sim="verilator", module="mnist")

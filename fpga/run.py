@@ -1,97 +1,14 @@
+import functools
 import json
+
 import numpy as np
 import pynq as pq
 from pynq.overlay import Overlay
 
-from tpu.tpu import TPUConfig
 from tpu.isa import Activation
-# from test.helpers import repack, packed, unpacked, reshape_for_matmul, tpu_matmul
-from tpu.isa import Activation, Op, LoadFunct, MoveFunct
-import operator
-import functools
+from tpu.tpu import TPUConfig
+from tpu.sw import *
 
-def unpacked(v, width, gran):
-    return [(v >> i * gran) & ((1 << gran) - 1) for i in range(-(-width // gran))]
-
-def packed(vals, width):
-    return functools.reduce(operator.or_, map(lambda x: (x[1] & ((1 << width) - 1)) << x[0] * width, enumerate(vals)))
-
-def repack(vals, src_width, target_width, aligned=False):
-    aligned_width = -(-src_width // target_width) * target_width if aligned else src_width
-    return unpacked(packed(vals, aligned_width), len(vals) * aligned_width, target_width)
-
-def reshape_for_matmul(a, b, config):
-    m, k, n = *a.shape, b.shape[1]
-    mrows = config.acc_mem_depth
-    kblocks = -(-k // config.rows)
-    padded_a = np.pad(a, ((0, 0), (0, kblocks * config.rows - k))).reshape(-1, kblocks, config.rows)
-    reshaped_a = np.concatenate([
-        padded_a[:(m // mrows) * mrows].reshape(-1, mrows, kblocks, config.rows).transpose(0, 2, 1, 3).reshape(-1, config.rows),
-        padded_a[(m // mrows) * mrows:].reshape(-1, kblocks, config.rows).transpose(1, 0, 2).reshape(-1, config.rows)])
-    a_words = [word for row in reshaped_a.tolist() for word in repack(row, config.act_dtype.width, config.host_data_width)]
-
-    nblocks = -(-n // config.cols)
-    padded_b = np.pad(b, ((0, kblocks * config.rows - k), (0, nblocks * config.cols - n))).reshape(kblocks, config.rows, nblocks, config.cols)
-    flipped_b = np.flip(padded_b, axis=1).transpose(2, 0, 1, 3).reshape(-1, config.cols)
-    b_words = [word for row in flipped_b.tolist() for word in repack(row, config.weight_dtype.width, config.host_data_width)]
-    return a_words, b_words
-
-def load_hw(weight_haddr, nrows):
-    return {"op": Op.LOAD, "funct": {"load": LoadFunct.HOST_WEIGHT}, "reps": nrows, "addr1": {"load_store": weight_haddr}}
-def load_ha(act_haddr, act_laddr, nrows):
-    return {"op": Op.LOAD, "funct": {"load": LoadFunct.HOST_ACT}, "reps": nrows, "addr1": {"load_store": act_haddr}, "addr2": act_laddr}
-def load_w(wsel=0): return {"op": Op.MOVE, "funct": {"move": MoveFunct.PRELOAD_WEIGHT}, "opt": {"acc_wsel": {"wsel": wsel}}}
-def spad_sync(): return {"op": Op.SPAD_SYNC}
-def preload_sync(): return {"op": Op.PRELOAD_SYNC}
-def matmul_sync(): return {"op": Op.MATMUL_SYNC}
-def nop(): return {"op": Op.NOP}
-def matmul(act_addr, acc_addr, nrows, wsel=0, acc=0):
-    return {"op": Op.MATMUL, "addr1": {"move_exec": acc_addr}, "addr2": act_addr, "reps": nrows, "opt": {"acc_wsel": {"wsel": wsel, "acc": acc}}}
-def activate(act_addr, acc_addr, nrows, actfn=Activation.RELU):
-    return {"op": Op.MOVE, "funct": {"move": MoveFunct.ACTIVATE}, "addr1": {"move_exec": acc_addr}, "addr2": act_addr, "reps": nrows,
-        "opt": {"actfn": actfn}}
-def store(act_haddr, act_laddr, nrows):
-    return {"op": Op.STORE, "reps": nrows, "addr1": {"load_store": act_haddr}, "addr2": act_laddr}
-def batched(n, m):
-    q, r = divmod(n, m)
-    return [m] * q + ([r] if r else [])
-
-def tpu_matmul(m, k, n, tpu_conf, actfn=Activation.RELU, act_haddr=0, weight_haddr=0, d_haddr=0):
-    mblocks = -(-m // tpu_conf.acc_mem_depth)
-    nblocks = -(-n // tpu_conf.cols)
-    kblocks = -(-k // tpu_conf.rows)
-
-    w_tile_bytes = -(-tpu_conf.weight_dtype.width * tpu_conf.cols // tpu_conf.host_data_width) * tpu_conf.rows * tpu_conf.host_data_width // 8
-    act_row_bytes = -(-tpu_conf.rows * tpu_conf.act_dtype.width // tpu_conf.host_data_width) * tpu_conf.host_data_width // 8
-
-    program = []
-    st_act_offset = 0
-    for j in range(nblocks):
-        ld_act_offset = 0
-        for k in range(mblocks):
-            nrows = tpu_conf.acc_mem_depth if k < mblocks - 1 else m - k * tpu_conf.acc_mem_depth
-            for i in range(kblocks):
-                program += [
-                    *[load_ha(act_haddr + ld_act_offset + i * tpu_conf.max_reps * act_row_bytes, i * tpu_conf.max_reps, rep)
-                        for i, rep in enumerate(batched(nrows, tpu_conf.max_reps))],
-                    load_hw(weight_haddr + (i * w_tile_bytes + j * w_tile_bytes * kblocks), tpu_conf.rows),
-                    load_w(),
-                    spad_sync(),
-                    preload_sync(),
-                ]
-                program.extend([matmul(ii * tpu_conf.max_reps, ii * tpu_conf.max_reps, rep, acc=i > 0)
-                    for ii, rep in enumerate(batched(nrows, tpu_conf.max_reps))])
-                ld_act_offset += act_row_bytes * nrows
-            program += [
-                matmul_sync(),
-                *[activate(i * tpu_conf.max_reps, i * tpu_conf.max_reps, rep, actfn=actfn) for i, rep in enumerate(batched(nrows, tpu_conf.max_reps))],
-                spad_sync(),
-                *[store(d_haddr + st_act_offset + i * tpu_conf.max_reps * act_row_bytes, i * tpu_conf.max_reps, rep)
-                    for i, rep in enumerate(batched(nrows, tpu_conf.max_reps))],
-                spad_sync(),
-            ]
-            st_act_offset += act_row_bytes * nrows
-    return program + [nop()]
 
 class PynqDevice:
     def __init__(self, ip_config, ip_name="TPU_0", bitstream="tpu.bit"):
@@ -117,44 +34,76 @@ class PynqDevice:
             while not self.csr_mmio.read(self.config.csr_offsets["tpur"]):
                 pass
             nins = xfer_size if i < ins_xfers - 1 else len(instrs) - i * xfer_size
-            addr_offset = i * xfer_size * -(-self.config.isa_layout.size // self.config.host_data_width) * self.config.host_data_width // 8
+            addr_offset = i * xfer_size * aligned_size(self.config.isa_layout.size, self.config.host_data_width) // 8
             self.csr_mmio.write(self.config.csr_offsets["insadr"], instr_buf.physical_address + addr_offset)
             self.csr_mmio.write(self.config.csr_offsets["nins"], nins)
             self.csr_mmio.write(self.config.csr_offsets["tpus"], 1)
-
         while not self.csr_mmio.read(self.config.csr_offsets["tpur"]): pass
 
-    def matmul(self, a, b, actfn=Activation.RELU):
-        m, k, n = *a.shape, b.shape[1]
-        a_words, b_words = reshape_for_matmul(a, b, self.config)
-        a_pqbuf = pq.allocate(len(a_words) * self.config.host_data_width // 8, dtype=np.uint8)
-        a_pqbuf[:] = [byte for word in a_words for byte in unpacked(word, self.config.host_data_width, 8)]
-        b_pqbuf = pq.allocate(len(b_words) * self.config.host_data_width // 8, dtype=np.uint8)
-        b_pqbuf[:] = [byte for word in b_words for byte in unpacked(word, self.config.host_data_width, 8)]
+    def qmatmul(self, a, bbuf, cbuf, n, zd, qmul, shamt, actfn=Activation.RELU):
+        m, k = a.shape
+        a_bytes = pack_activations(a, self.config)
+        abuf = pq.allocate(len(a_bytes), dtype=np.uint8)
+        abuf[:] = a_bytes
 
-        a_tile_row_size = -(-self.config.act_dtype.width * self.config.rows // self.config.host_data_width) * self.config.host_data_width // 8
-        with pq.allocate(m * -(-n // self.config.cols) * a_tile_row_size, dtype=np.uint8) as pqbuf:
-            instrs = tpu_matmul(m, k, n, self.config, actfn=actfn,
-                act_haddr=a_pqbuf.physical_address, weight_haddr=b_pqbuf.physical_address, d_haddr=pqbuf.physical_address)
-            self._start_tpu(instrs)
-            res = np.array([v for row in pqbuf.reshape(-1, a_tile_row_size) 
-                for v in unpacked(packed(row.tolist(), 8), self.config.act_dtype.width * self.config.rows, self.config.act_dtype.width)])
-        return res.reshape(-1, m, self.config.cols).transpose(1, 0, 2).reshape(m, -1)[:, :n]
+        a_tile_row_size = aligned_size(self.config.act_dtype.width * self.config.rows, self.config.host_data_width) // 8
+        resbuf = pq.allocate(m * ceildiv(n, self.config.cols) * a_tile_row_size, dtype=np.uint8)
+
+        instrs = tpu_matmul(m, k, n, self.config, zd, shamt.item(), qmul.item(), actfn=actfn,
+            a_haddr=abuf.physical_address, c_haddr=cbuf.physical_address, b_haddr=bbuf.physical_address, d_haddr=resbuf.physical_address)
+        self._start_tpu(instrs)
+        return unpack_activations(resbuf, m, n, self.config)
+
+class PynqModel:
+    def __init__(self, modelfn, tensorfn, device: PynqDevice):
+        self.dev = device
+        with open(modelfn) as fm, open(tensorfn, 'rb') as ft:
+            self.ops = json.load(fm)
+            self.tensors = ft.read()
+        self.layers = [self._parse_op(op) for op in self.ops]
+
+    def __call__(self, x):
+        return functools.reduce(lambda x, f: f(x), self.layers, x)
+
+    def _parse_op(self, op):
+        match op["op"]:
+            case "fully_connected":
+                qparams = {k: np.array(v) for k, v in op["qparams"].items()}
+                tensors = {k: self._extract_tensor(v)  for k, v in op["args"].items()}
+                bbuf = pq.allocate(len(tensors["weights"]), dtype=np.uint8)
+                bbuf[:] = tensors["weights"]
+                cbuf = pq.allocate(len(tensors["bias"]), dtype=np.uint8)
+                cbuf[:] = tensors["bias"]
+                n = op["args"]["weight"]["shape"][1]
+                return functools.partial(self.dev.qmatmul, n=n, bbuf=bbuf, cbuf=cbuf,
+                    zd=qparams["output_zp"], qmul=qparams["qmul"], shamt=qparams["shamt"], actfn=Activation[op["act"]])
+
+            case "flatten":
+                def flatten(x):
+                    start_dim, end_dim = op["args"]
+                    end_dim = len(x.shape) + end_dim if end_dim < 0 else end_dim
+                    return x.reshape(*x.shape[:start_dim], -1, *x.shape[end_dim + 1:])
+                return flatten
+
+    def _extract_tensor(self, info):
+        return np.frombuffer(self.tensors[info["offset"]:info["offset"] + info["size"]], dtype=np.uint8)
+
 
 if __name__ == '__main__':
+    from examples.mnist import loader, display_outputs, display_image
+
     with open("config.json") as f:
         config = TPUConfig.fromdict(json.load(f))
+    dev = PynqDevice(config, bitstream="tpu.bit")
+    model = PynqModel("model.json", "tensors.bin", dev)
 
-    actfn = Activation.RELU
-    a = np.random.randint(0, 255, size=(32, 32))
-    b = np.random.randint(-128, 127, size=(32, 32))
-    d = a @ b
-    match actfn:
-        case Activation.RELU: expected = (d >> 8).clip(min=0, max=255)
-        case Activation.NOP: expected = (d >> 8).clip(max=255) & 0xFF
+    *_, x_test, y_test = fetch_mnist()
+    x = x[0].astype(np.float32) / 255.0
+    x = resize_bilinear(x.reshape(-1, 28, 28), 12, 12)
+    qmin, qmax = dtype_to_bounds(config.act_dtype)
+    s, z = 1.0 / (qmax - qmin), qmin
+    x = (x / s + z).astype(config.act_dtype.numpy)
 
-    dev = PynqDevice(config)
-    result = dev.matmul(a, b, actfn=actfn)
-    assert np.array_equal(result, expected)
-
-
+    display_image(x[0].reshape(-1).astype(np.int32) + 128, size=(12, 12))
+    y = model(x)
+    display_outputs(y[0], y_test[0], qmin, qmax)

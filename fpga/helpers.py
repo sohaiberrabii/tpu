@@ -53,7 +53,8 @@ def generate_bitstream(config, board="pynq-z2", build_dir=None):
     if res.returncode:
         raise RuntimeError(res.stderr)
 
-    return next(build_dir.rglob("*.bit")), next(build_dir.rglob("*.hwh"))
+    bit, hwh = next(build_dir.rglob("*.bit")).rename(build_dir / "tpu.bit"), next(build_dir.rglob("*.hwh")).rename(build_dir / "tpu.hwh")
+    return bit, hwh
 
 def deploy(config_fn, bit_fn, hwh_fn, remote_dir=""):
     assert (dev := os.getenv("PYNQ")),  f"PYNQ env var should be set to properly configured ssh alias of pynq-z2 device"
@@ -65,7 +66,11 @@ def deploy(config_fn, bit_fn, hwh_fn, remote_dir=""):
 
 if __name__ == '__main__':
     from tpu.tpu import TPUConfig
-    config = TPUConfig(rows=8, cols=8, max_reps=15, instr_fifo_depth=32, act_mem_depth=32, acc_mem_depth=32, host_data_width=64, weight_fifo_depth=16)
-    generate_bitstream(config)
+    config = TPUConfig(rows=8, cols=8, act_mem_depth=32, acc_mem_depth=32, weight_fifo_depth=32, instr_fifo_depth=16,
+        act_dtype=IntType(width=8, signed=True), weight_dtype=IntType(width=8, signed=True), acc_dtype=IntType(width=32, signed=True))
     with open(Path(__file__).parent / "build/config.json", "w") as f:
         json.dump(asdict(config), f, indent=4)
+    print(f"Performing implementation for configuration: {json.dumps(config, indent=2)}")
+    bit, hwh = generate_bitstream(config)
+    print(f"Generated bitstream: {bit}")
+    print(f"Generated hardware handoff: {hwh}")
