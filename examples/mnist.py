@@ -14,7 +14,7 @@ import torch.optim as optim
 import numpy as np
 
 from tpu.sw import *
-from tpu.tpu import IntType, TPUConfig, TPU
+from tpu.tpu import TPUConfig, TPU
 from test.cocotb_test.helpers import CocotbModel, TPUAxiInterface, cocotb_run
 
 ASSETDIR = Path(__file__).parent / "assets"

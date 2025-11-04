@@ -11,7 +11,7 @@ from amaranth.lib import wiring
 from amaranth.back.verilog import convert
 from amaranth.lib import wiring
 from tpu.tpu import TPU
-from tpu.sw import fetch
+from tpu.sw import fetch, IntType
 
 
 class InterfaceRenamer(wiring.Component):
@@ -66,11 +66,13 @@ def deploy(config_fn, bit_fn, hwh_fn, remote_dir=""):
 
 if __name__ == '__main__':
     from tpu.tpu import TPUConfig
+    build_dir = Path(__file__).parent / "build"
+    build_dir.mkdir(exist_ok=True)
     config = TPUConfig(rows=8, cols=8, act_mem_depth=32, acc_mem_depth=32, weight_fifo_depth=32, instr_fifo_depth=16,
         act_dtype=IntType(width=8, signed=True), weight_dtype=IntType(width=8, signed=True), acc_dtype=IntType(width=32, signed=True))
-    with open(Path(__file__).parent / "build/config.json", "w") as f:
+    with open(build_dir / "config.json", "w") as f:
         json.dump(asdict(config), f, indent=4)
-    print(f"Performing implementation for configuration: {json.dumps(config, indent=2)}")
+    print(f"Performing implementation for configuration: {json.dumps(asdict(config), indent=2)}")
     bit, hwh = generate_bitstream(config)
     print(f"Generated bitstream: {bit}")
     print(f"Generated hardware handoff: {hwh}")

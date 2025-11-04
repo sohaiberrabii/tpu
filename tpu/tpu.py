@@ -14,20 +14,8 @@ from tpu.decoder import InstructionDecoder
 from tpu import bus
 from tpu.bus import DMAReader, DMAWriter, Arbiter, AXI4Lite, AXI4LiteCSRBridge
 from tpu.eltwise import ActivationUnit
+from tpu.sw import IntType
 
-
-@dataclass(frozen=True)
-class IntType:
-    width: int
-    signed: bool
-
-    @property
-    def shape(self):
-        return am.signed(self.width) if self.signed else am.unsigned(self.width)
-
-    @property
-    def numpy(self):
-        return ('i' if self.signed else 'u') + str(1 << max((self.width - 1).bit_length() - 3, 0))
 
 @dataclass(frozen=True)
 class TPUConfig:

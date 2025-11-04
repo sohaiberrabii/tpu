@@ -4,8 +4,7 @@ import numpy as np
 from amaranth.sim import Simulator, Period
 
 from tpu.isa import Activation
-from tpu.tpu import IntType
-from tpu.sw import dtype_to_bounds, pack_activations, pack_bias, pack_weights, qmatmul
+from tpu.sw import IntType, dtype_to_bounds, pack_activations, pack_bias, pack_weights, qmatmul
 
 def run_sim(dut, tb, processes=[], comb=False, vcdfn=None):
     sim = Simulator(dut)

@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 import sys
 import gzip
 import urllib.request
@@ -9,6 +10,21 @@ import json
 import numpy as np
 
 from tpu.isa import *
+
+import amaranth as am
+
+@dataclass(frozen=True)
+class IntType:
+    width: int
+    signed: bool
+
+    @property
+    def shape(self):
+        return am.signed(self.width) if self.signed else am.unsigned(self.width)
+
+    @property
+    def numpy(self):
+        return ('i' if self.signed else 'u') + str(1 << max((self.width - 1).bit_length() - 3, 0))
 
 def ceildiv(a, b): return -(-a // b)
 def aligned_size(src, dst): return ceildiv(src, dst) * dst
