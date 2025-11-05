@@ -16,13 +16,9 @@ setup(
         "test": [ 
             "pytest",
             "numpy",
-        ],
-        "cocotb": [
             "cocotb @ git+https://github.com/cocotb/cocotb.git",
-        ],
-        "examples": [
             "torchvision",
-        ]
+        ],
     },
 
 )
