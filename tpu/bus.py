@@ -78,10 +78,6 @@ class AXI4LiteCSRBridge(wiring.Component):
             self.csr_bus.w_stb.eq(aw_hs & w_hs),
             self.csr_bus.w_data.eq(self.bus.wdata),
             self.csr_bus.addr.eq(am.Mux(self.csr_bus.w_stb, self.bus.awaddr >> 2, self.bus.araddr >> 2)),
-
-            self.csr_bus.r_stb.eq(ar_hs),
-            self.bus.rdata.eq(self.csr_bus.r_data),
-            self.bus.arready.eq((~self.bus.rvalid | self.bus.rready) & ~self.csr_bus.w_stb),
         ]
 
         with m.If(self.csr_bus.w_stb):
@@ -89,11 +85,23 @@ class AXI4LiteCSRBridge(wiring.Component):
         with m.Elif(b_hs):
             m.d.sync += self.bus.bvalid.eq(0)
 
+        rdata_q = am.Signal.like(self.csr_bus.r_data)
+        rvalid_q = am.Signal()
+        with m.If(self.bus.rvalid & ~self.bus.rready & ~rvalid_q):
+            m.d.sync += [rvalid_q.eq(1), rdata_q.eq(self.csr_bus.r_data)]
+        with m.Elif(rvalid_q & self.bus.rready):
+            m.d.sync += rvalid_q.eq(0)
+
         with m.If(self.csr_bus.r_stb):
             m.d.sync += self.bus.rvalid.eq(1)
         with m.Elif(r_hs):
             m.d.sync += self.bus.rvalid.eq(0)
 
+        m.d.comb += [
+            self.csr_bus.r_stb.eq(ar_hs),
+            self.bus.rdata.eq(am.Mux(rvalid_q, rdata_q, self.csr_bus.r_data)),
+            self.bus.arready.eq((~self.bus.rvalid | self.bus.rready) & ~self.csr_bus.w_stb),
+        ]
         return m 
 
 class Signature(wiring.Signature):
