@@ -23,6 +23,7 @@ class InstructionDecoder(Component):
             "store_req":       Out(stream.Signature(Request(sp_addr_width, haddr_width, max_repeats))),
 
             "ex_done":         In(1),
+            "act_done":        In(1),
         })
     def elaborate(self, _):
         m = am.Module()
@@ -43,7 +44,7 @@ class InstructionDecoder(Component):
             (self.store_req.valid & ~self.store_req.ready) |
             (preload_sync & ~self.preload_req.ready) |
             (matmul_sync & ~self.ex_done) |
-            (spad_sync & ~(self.load_req.ready & self.activation_req.ready & self.store_req.ready)) |
+            (spad_sync & ~(self.load_req.ready & self.act_done & self.store_req.ready)) |
             (acc_sync & ~(self.ex_done & self.load_acc_req.ready))
         )
 

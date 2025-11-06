@@ -71,7 +71,7 @@ async def test_matmul(dut):
         instr_baseaddr = len(tpu_axi.memory) - len(instr_bytes)
         tpu_axi.memory[instr_baseaddr:] = instr_bytes
 
-        result_size = m * -(-n // config.cols) * -(-config.act_dtype.width * config.rows // config.host_data_width) * config.host_data_width // 8
+        result_size = m * ceildiv(n, config.cols) * aligned_size(config.act_dtype.width * config.rows, config.host_data_width) // 8
         await run_tpu(tpu_axi, config, len(instrs), instr_baseaddr)
         result = unpack_activations(tpu_axi.memory[res_offset:res_offset + result_size], m, n, config)
         np.testing.assert_array_equal(result, expected)

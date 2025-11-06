@@ -247,6 +247,7 @@ class ActivationRequest(Request):
 
 #NOTE: this is not properly pipelined. plus this is basically the same control as executecontroller. 
 # Except the latter was designed with the assumption of a fixed latency. 
+#TODO: pipeline depth of the scaling should be generic, here only latency=1 is implemented
 class ActivationController(Component):
     def __init__(self, src_addr_width, dst_addr_width, max_repeats, width):
         self.repeat_counter = am.Signal(range(max_repeats + 1))
@@ -257,6 +258,7 @@ class ActivationController(Component):
             "src_req":  Out(stream.Signature(data.StructLayout({"addr": src_addr_width}))),
             "src_resp": In(stream.Signature(data.StructLayout({"data": width}))),
             "dst":      Out(stream.Signature(data.StructLayout({"addr": dst_addr_width, "data": width, "actfn": Activation}))),
+            "done":     Out(1),
         })
     def elaborate(self, _):
         m = am.Module()
@@ -288,10 +290,11 @@ class ActivationController(Component):
             ]
 
         m.d.comb += [
+            self.done.eq(self.req.ready & self.dst.ready),
             self.req.ready.eq(req_read_done & req_output_done),
             self.src_req.valid.eq(~req_read_done),
 
-            self.src_resp.ready.eq(self.dst.ready),
+            self.src_resp.ready.eq(self.dst.ready), #FIXME: assumes scaler doesn't fifo i.e. dst.ready <=> done
             self.dst.valid.eq(self.src_resp.valid),
             self.dst.payload.data.eq(self.src_resp.payload.data),
         ]

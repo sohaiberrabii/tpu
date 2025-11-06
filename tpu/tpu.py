@@ -183,7 +183,10 @@ class TPU(Component):
         connect(m, self.decoder.ex_req, self.ex_ctrl.req)
         connect(m, self.decoder.activation_req, self.activation_ctrl.req)
         connect(m, self.decoder.scaler_cfg, self.actfn.config)
-        m.d.comb += self.decoder.ex_done.eq(self.ex_ctrl.done)
+        m.d.comb += [
+            self.decoder.ex_done.eq(self.ex_ctrl.done),
+            self.decoder.act_done.eq(self.activation_ctrl.done),
+        ]
 
         #FIXME:
         # connect(m, self.acc_mem.write, self.ex_ctrl.write_output)
@@ -212,6 +215,7 @@ class TPU(Component):
         connect(m, self.instr_fifo.r_stream, self.decoder.instr)
         connect(m, self.instr_dma_reader.resp, self.instr_fifo.w_stream)
         m.d.comb += [
+            #FIXME: insn = 1, instr dma becomes ready one cycle before r_level is set to 1 leading to fasle tpu ready/done
             self.tpu_ready.f.tpur.r_data.eq(self.instr_dma_reader.req.ready & (self.instr_fifo.r_level == 0)),
             self.instr_dma_reader.req.valid.eq(self.tpu_start.f.tpus.w_stb),
             self.instr_dma_reader.req.payload.addr.eq(self.instr_adr.f.insadr.data),

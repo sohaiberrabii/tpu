@@ -7,6 +7,7 @@ class Activation(Enum):
     NONE = 0
     RELU = 1
 
+#TODO: single op for sync instructions
 class Op(Enum):
     NOP           = 0
     LOAD          = 1     # LOAD from host to local FIFO / Scratchpad / Accumulator

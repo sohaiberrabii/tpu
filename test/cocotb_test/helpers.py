@@ -104,11 +104,12 @@ async def stream_consumer(clk, queue, ready, valid, payload, rand=False):
             await queue.put({k: v.value for k, v in payload.items()})
 
 # queue -> stream, waits for ready
-async def stream_producer(clk, queue, ready, valid, payload, timeout=1000):
+async def stream_producer(clk, queue, ready, valid, payload, timeout=1000, rand=False):
     while True:
         await RisingEdge(clk)
         valid.value = 0
-        if queue.qsize():
+        p = random.getrandbits(1) if rand else 1
+        if p and queue.qsize():
             valid.value = 1
             for k, v in (await queue.get()).items():
                 payload[k].value = v
@@ -155,7 +156,7 @@ class TPUAxiInterface:
         cocotb.start_soon(self.memory_write_process())
 
         for k, v in self.producer_intfs.items():
-            cocotb.start_soon(stream_producer(self.dut.clk, v["queue"], **self._stream_payload(k, v["payload"])))
+            cocotb.start_soon(stream_producer(self.dut.clk, v["queue"], **self._stream_payload(k, v["payload"]), rand=self.rand))
 
         for k, v in self.consumer_intfs.items():
             cocotb.start_soon(stream_consumer(self.dut.clk, v["queue"], **self._stream_payload(k, v["payload"]), rand=self.rand))

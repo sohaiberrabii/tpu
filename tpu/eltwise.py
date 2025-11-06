@@ -17,6 +17,8 @@ class Scaler(Component):
 
         out_width = out_shape.elem_shape.width
         self.min, self.max = -(1 << out_width - 1), (1 << out_width - 1) - 1
+        self.muls = am.Signal(data.ArrayLayout(am.Shape(in_shape.elem_shape.width * 2, signed=in_shape.elem_shape.signed), in_shape.length))
+
         super().__init__({
             "req": In(stream.Signature(data.StructLayout({
                 "a": in_shape, "b": in_shape, "zp": out_shape.elem_shape, "shamt": ceil_log2(max_shift + 1)}))),
@@ -26,13 +28,16 @@ class Scaler(Component):
         m = am.Module()
         assert all(isinstance(x.shape(), data.ArrayLayout) for x in [self.req.payload.a, self.req.payload.b, self.resp.payload])
 
-        m.d.comb += [
-            self.resp.valid.eq(self.req.valid),
-            self.req.ready.eq(self.resp.ready),
-        ]
+        m.d.comb += self.req.ready.eq(~self.resp.valid | self.resp.ready)
+        m.d.comb += [resp.eq(clip((p >> self.req.payload.shamt) + self.req.payload.zp, self.min, self.max))
+            for resp, p in zip(self.resp.payload, self.muls)]
 
-        m.d.comb += [resp.eq(clip(((a * b) >> self.req.payload.shamt) + self.req.payload.zp, self.min, self.max))
-            for resp, a, b in zip(self.resp.payload, self.req.payload.a, self.req.payload.b)]
+        with m.If(self.req.valid & self.req.ready):
+            m.d.sync += [p.eq(a * b) for p, a, b in zip(self.muls, self.req.payload.a, self.req.payload.b)]
+            m.d.sync += self.resp.valid.eq(1)
+        with m.Elif(self.resp.valid & self.resp.ready):
+            m.d.sync += self.resp.valid.eq(0)
+
         return m
 
 class ScalerConfig(data.StructLayout):
@@ -82,7 +87,8 @@ class ActivationUnit(Component):
             self.scaler.resp.ready.eq(self.resp.ready),
             self.resp.valid.eq(self.scaler.resp.valid),
             self.resp.payload.data.eq(self.scaler.resp.payload),
-
-            self.resp.payload.addr.eq(self.req.payload.addr),
         ]
+
+        with m.If(self.req.valid & self.req.ready):
+            m.d.sync += self.resp.payload.addr.eq(self.req.payload.addr)
         return m
