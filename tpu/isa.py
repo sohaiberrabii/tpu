@@ -43,7 +43,6 @@ class ISALayout(data.StructLayout):
                 "reps":  ceil_log2(max_repeats + 1),
                 "addr1": data.UnionLayout({
                         "load_store": haddr_width,
-                        # "move": acc_addr_width,
                         "move_exec": data.StructLayout({"raddr": acc_addr_width, "waddr": acc_addr_width})}),
                 "addr2": data.UnionLayout({"act": sp_addr_width, "acc": acc_addr_width}),
                 "opt":  data.UnionLayout({"acc_wsel": data.StructLayout({"acc": AccMode, "wsel": 1}), "actfn": Activation}),

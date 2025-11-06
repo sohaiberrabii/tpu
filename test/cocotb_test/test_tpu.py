@@ -23,7 +23,7 @@ from test.helpers import matmul_case
 
 @pytest.mark.parametrize("data_width", [64])
 @pytest.mark.parametrize("max_reps", [15])
-@pytest.mark.parametrize("instr_fifo_depth", [32])
+@pytest.mark.parametrize("instr_fifo_depth", [16])
 @pytest.mark.parametrize(
     "dim, acc_mem_depth, act_mem_depth, weight_fifo_depth", [
     (8, 32, 32, 32),
@@ -45,14 +45,14 @@ def test_tpu_standalone(dim, act_mem_depth, acc_mem_depth, weight_fifo_depth, in
 
 @cocotb.test()
 async def test_matmul(dut):
-    tpu_axi = TPUAxiInterface(dut)
+    tpu_axi = TPUAxiInterface(dut, rand=True)
     await tpu_axi.init()
     await tpu_axi.reset()
     with open(Path(__file__).parent / "build" / "config.json") as f:
         config = TPUConfig.fromdict(json.load(f))
 
-    for i in range(3):
-        m, k, n = [random.randint(8, 65) for _ in range(3)]
+    for i in range(10):
+        m, k, n = [random.randint(8, 180) for _ in range(3)]
         actfn = random.choice(list(Activation))
         print(f"Run {i} with dims (M, K, N)={m, k, n}")
         actbuf, wbuf, biasbuf, actfn, zd, shamt, qmul, expected = matmul_case(m, k, n, config)

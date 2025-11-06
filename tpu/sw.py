@@ -72,7 +72,7 @@ def tpu_matmul(m, k, n, tpu_conf, output_zp, shamt, qmul, actfn=Activation.RELU,
                 program += [
                     *[load_ha(a_haddr + ld_act_offset + i * tpu_conf.max_reps * act_row_bytes, i * tpu_conf.max_reps, rep)
                         for i, rep in enumerate(batched(nrows, tpu_conf.max_reps))],
-                    load_hw(b_haddr + (i * w_tile_bytes + j * w_tile_bytes * kblocks), tpu_conf.rows),
+                    load_hw(b_haddr + i * w_tile_bytes + j * w_tile_bytes * kblocks, tpu_conf.rows),
                     matmul_sync(), #NOTE: wsel is not yet supported
                     load_w(),
                     spad_sync(),
@@ -239,7 +239,7 @@ def resize_bilinear(x, out_h, out_w, half_pixel_centers=False):
 def qmatmul(a, b, c, zd, qmul, shamt, act_dtype, acc_dtype, actfn=Activation.RELU):
     out = a.astype(acc_dtype.numpy) @ b + c
     out = np.maximum(out, 0) if actfn == Activation.RELU else out
-    out = (qmul.astype(np.int64) * out >> shamt) + zd
+    out = (qmul.astype(np.int64) * out.astype(np.int64) >> shamt) + zd #FIXME: int64->2 * acc_dtype.width
     return np.clip(out, *dtype_to_bounds(act_dtype)).astype(act_dtype.numpy)
 
 class NumpyModel:

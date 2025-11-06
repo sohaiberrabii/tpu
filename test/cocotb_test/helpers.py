@@ -1,4 +1,5 @@
 import inspect
+import random
 from pathlib import Path
 
 import numpy as np
@@ -48,7 +49,7 @@ async def tb_qmatmul(tpu_axi, config, a, n, b_bytes, c_bytes, zd, qmul, shamt, a
     data_bytes = np.concatenate([b_bytes, c_bytes, a_bytes])
     tpu_axi.memory[:len(data_bytes)] = data_bytes
     res_offset = len(data_bytes)
-    instrs = tpu_matmul(m, k, n, config, zd, shamt.item(), qmul.item(), actfn=actfn,
+    instrs = tpu_matmul(m, k, n, config, zd.item(), shamt.item(), qmul.item(), actfn=actfn,
         a_haddr=len(b_bytes) + len(c_bytes), c_haddr=len(b_bytes), d_haddr=res_offset)
 
     ibuf = repack([config.isa_layout.const(instr).as_bits() for instr in instrs], config.isa_layout.size, config.host_data_width, aligned=True)
@@ -56,7 +57,7 @@ async def tb_qmatmul(tpu_axi, config, a, n, b_bytes, c_bytes, zd, qmul, shamt, a
     instr_baseaddr = len(tpu_axi.memory) - len(instr_bytes)
     tpu_axi.memory[instr_baseaddr:] = instr_bytes
 
-    result_size = m * -(-n // config.cols) * -(-config.act_dtype.width * config.rows // config.host_data_width) * config.host_data_width // 8
+    result_size = m * ceildiv(n, config.cols) * aligned_size(config.act_dtype.width * config.rows, config.host_data_width) // 8
     await run_tpu(tpu_axi, config, len(instrs), instr_baseaddr)
     return unpack_activations(tpu_axi.memory[res_offset:res_offset + result_size], m, n, config)
 
@@ -94,16 +95,16 @@ class CocotbModel:
         return np.frombuffer(self.tensors[info["offset"]:info["offset"] + info["size"]], dtype=np.uint8)
 
 # stream -> queue
-async def stream_consumer(clk, queue, ready, valid, payload):
-    ready.value = 1
+async def stream_consumer(clk, queue, ready, valid, payload, rand=False):
     while True:
         await RisingEdge(clk)
+        ready.value = random.getrandbits(1) if rand else 1
         await ReadOnly()
-        if valid.value:
+        if ready.value and valid.value:
             await queue.put({k: v.value for k, v in payload.items()})
 
 # queue -> stream, waits for ready
-async def stream_producer(clk, queue, ready, valid, payload, timeout=10):
+async def stream_producer(clk, queue, ready, valid, payload, timeout=1000):
     while True:
         await RisingEdge(clk)
         valid.value = 0
@@ -157,7 +158,7 @@ class TPUAxiInterface:
             cocotb.start_soon(stream_producer(self.dut.clk, v["queue"], **self._stream_payload(k, v["payload"])))
 
         for k, v in self.consumer_intfs.items():
-            cocotb.start_soon(stream_consumer(self.dut.clk, v["queue"], **self._stream_payload(k, v["payload"])))
+            cocotb.start_soon(stream_consumer(self.dut.clk, v["queue"], **self._stream_payload(k, v["payload"]), rand=self.rand))
 
     async def read_csr(self, addr):
         await self.producer_intfs["ctrl__ar"]["queue"].put({"addr": addr, "prot": 0})
