@@ -4,6 +4,7 @@ from amaranth.lib.wiring import In, Out, Component
 from amaranth.utils import ceil_log2
 
 from tpu.isa import Activation
+from tpu.helpers import Shifter
 
 
 def clip(x, min, max):
@@ -45,7 +46,8 @@ class ScalerConfig(data.StructLayout):
         super().__init__({"qmul": qmul_shape, "shamt": shamt_width, "zp": zp_shape})
 
 class ActivationUnit(Component):
-    def __init__(self, src_layout, dst_layout, addr_width):
+    def __init__(self, src_layout, dst_layout, addr_width, latency=2):
+        assert latency == 2, "only latency=2 is currently supported" #TODO:
         assert isinstance(src_layout, data.ArrayLayout) and isinstance(dst_layout, data.ArrayLayout)
 
         self.qmul = am.Signal(src_layout.elem_shape)
@@ -54,14 +56,19 @@ class ActivationUnit(Component):
 
         self.scaler = Scaler(src_layout, dst_layout, max_shift=src_layout.elem_shape.width * 2 - 1)
 
+        self.latency = latency
+        self.latency_counter = am.Signal(range(self.latency))
+        self.sync_shifter = Shifter(addr_width, latency) # synchronize addr payload with data processing
+
         super().__init__({
             "config": In(stream.Signature(ScalerConfig(self.qmul.shape(), self.zp.shape(), self.shamt.shape()), always_ready=True)),
             "req": In(stream.Signature(data.StructLayout({"addr": addr_width, "data": src_layout, "actfn": Activation}))),
             "resp": Out(stream.Signature(data.StructLayout({"addr": addr_width, "data": dst_layout}))),
+            "done": Out(1),
         })
+
     def elaborate(self, _):
         m = am.Module()
-
         with m.If(self.config.ready & self.config.valid):
             m.d.sync += [
                 self.qmul.eq(self.config.payload.qmul),
@@ -69,26 +76,42 @@ class ActivationUnit(Component):
                 self.zp.eq(self.config.payload.zp),
             ]
 
-        activated = am.Signal.like(self.req.payload.data)
-        with m.Switch(self.req.payload.actfn):
-            with m.Case(Activation.NONE):
-                m.d.comb += activated.eq(self.req.payload.data)
-            with m.Case(Activation.RELU):
-                m.d.comb += [act.eq(am.Mux(p[-1], 0, p)) for act, p in zip(activated, self.req.payload.data)]
-
+        m.submodules.sync_shifter = self.sync_shifter
         m.submodules.scaler = self.scaler
+
+        req_fire = self.req.valid & self.req.ready
+        scaler_req_fire = self.scaler.req.valid & self.scaler.req.ready
         m.d.comb += [
-            self.scaler.req.valid.eq(self.req.valid),
-            self.scaler.req.payload.a.eq(activated),
-            self.scaler.req.payload.b.eq(self.qmul.replicate(activated.shape().length)),
+            self.done.eq((self.latency_counter == 0) & self.scaler.req.ready),
+            self.sync_shifter.en.eq(req_fire | scaler_req_fire),
+            self.sync_shifter.d.eq(self.req.payload.addr),
+            self.resp.payload.addr.eq(self.sync_shifter.q),
+        ]
+
+        with m.If(req_fire):
+            m.d.sync += [
+                self.latency_counter.eq(self.latency - 1),
+                self.scaler.req.valid.eq(1),
+            ]
+            with m.Switch(self.req.payload.actfn):
+                with m.Case(Activation.NONE):
+                    m.d.sync += self.scaler.req.payload.a.eq(self.req.payload.data)
+                with m.Case(Activation.RELU):
+                    m.d.sync += [act.eq(am.Mux(p[-1], 0, p)) for act, p in zip(self.scaler.req.payload.a, self.req.payload.data)]
+        with m.Elif(scaler_req_fire):
+            m.d.sync += [
+                self.latency_counter.eq(self.latency_counter - 1),
+                self.scaler.req.valid.eq(0),
+            ]
+
+        m.d.comb += [
+            self.scaler.req.payload.b.eq(self.qmul.replicate(self.req.payload.data.shape().length)),
             self.scaler.req.payload.shamt.eq(self.shamt),
             self.scaler.req.payload.zp.eq(self.zp),
-            self.req.ready.eq(self.scaler.req.ready),
             self.scaler.resp.ready.eq(self.resp.ready),
+
+            self.req.ready.eq(~self.scaler.req.valid | self.scaler.req.ready),
             self.resp.valid.eq(self.scaler.resp.valid),
             self.resp.payload.data.eq(self.scaler.resp.payload),
         ]
-
-        with m.If(self.req.valid & self.req.ready):
-            m.d.sync += self.resp.payload.addr.eq(self.req.payload.addr)
         return m

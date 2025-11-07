@@ -186,6 +186,7 @@ class TPU(Component):
         m.d.comb += [
             self.decoder.ex_done.eq(self.ex_ctrl.done),
             self.decoder.act_done.eq(self.activation_ctrl.done),
+            self.activation_ctrl.actfn_done.eq(self.actfn.done),
         ]
 
         #FIXME:
