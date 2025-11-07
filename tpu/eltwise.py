@@ -11,7 +11,7 @@ def clip(x, min, max):
     return am.Mux(x < min, min, am.Mux(x > max, max, x))
 
 class Scaler(Component):
-    """((a * b) >> shamt) + zp
+    """Reg((Reg(a * b) >> shamt) + zp)
     """
     def __init__(self, in_shape, out_shape, max_shift=63):
         assert isinstance(in_shape, data.ArrayLayout) and isinstance(out_shape, data.ArrayLayout) and in_shape.length == out_shape.length
@@ -29,15 +29,21 @@ class Scaler(Component):
         m = am.Module()
         assert all(isinstance(x.shape(), data.ArrayLayout) for x in [self.req.payload.a, self.req.payload.b, self.resp.payload])
 
-        m.d.comb += self.req.ready.eq(~self.resp.valid | self.resp.ready)
-        m.d.comb += [resp.eq(clip((p >> self.req.payload.shamt) + self.req.payload.zp, self.min, self.max))
-            for resp, p in zip(self.resp.payload, self.muls)]
+        valid_muls = am.Signal()
+        with m.If(valid_muls & (~self.resp.valid | self.resp.ready)):
+            m.d.sync += [resp.eq(clip((p >> self.req.payload.shamt) + self.req.payload.zp, self.min, self.max))
+                for resp, p in zip(self.resp.payload, self.muls)]
+
+        with m.If(~self.resp.valid | self.resp.ready):
+            m.d.sync += self.resp.valid.eq(valid_muls)
 
         with m.If(self.req.valid & self.req.ready):
             m.d.sync += [p.eq(a * b) for p, a, b in zip(self.muls, self.req.payload.a, self.req.payload.b)]
-            m.d.sync += self.resp.valid.eq(1)
-        with m.Elif(self.resp.valid & self.resp.ready):
-            m.d.sync += self.resp.valid.eq(0)
+            m.d.sync += valid_muls.eq(1)
+        with m.Elif(~self.resp.valid | self.resp.ready):
+            m.d.sync += valid_muls.eq(0)
+
+        m.d.comb += self.req.ready.eq(~valid_muls | self.resp.ready)
 
         return m
 
@@ -45,6 +51,8 @@ class ScalerConfig(data.StructLayout):
     def __init__(self, qmul_shape, zp_shape, shamt_width):
         super().__init__({"qmul": qmul_shape, "shamt": shamt_width, "zp": zp_shape})
 
+#TODO: latency -> pipeline depth / in-flight
+#FIXME: done is actually last
 class ActivationUnit(Component):
     def __init__(self, src_layout, dst_layout, addr_width, latency=2):
         assert latency == 2, "only latency=2 is currently supported" #TODO:
@@ -80,29 +88,27 @@ class ActivationUnit(Component):
         m.submodules.scaler = self.scaler
 
         req_fire = self.req.valid & self.req.ready
-        scaler_req_fire = self.scaler.req.valid & self.scaler.req.ready
+        resp_fire = self.resp.valid & self.resp.ready
+        last = self.latency_counter == 0
+
         m.d.comb += [
-            self.done.eq((self.latency_counter == 0) & self.scaler.req.ready),
-            self.sync_shifter.en.eq(req_fire | scaler_req_fire),
+            self.done.eq(last & self.scaler.req.ready),
+            self.sync_shifter.en.eq(req_fire | resp_fire),
             self.sync_shifter.d.eq(self.req.payload.addr),
             self.resp.payload.addr.eq(self.sync_shifter.q),
         ]
 
+        m.d.comb += self.scaler.req.valid.eq(self.req.valid)
         with m.If(req_fire):
-            m.d.sync += [
-                self.latency_counter.eq(self.latency - 1),
-                self.scaler.req.valid.eq(1),
-            ]
-            with m.Switch(self.req.payload.actfn):
-                with m.Case(Activation.NONE):
-                    m.d.sync += self.scaler.req.payload.a.eq(self.req.payload.data)
-                with m.Case(Activation.RELU):
-                    m.d.sync += [act.eq(am.Mux(p[-1], 0, p)) for act, p in zip(self.scaler.req.payload.a, self.req.payload.data)]
-        with m.Elif(scaler_req_fire):
-            m.d.sync += [
-                self.latency_counter.eq(self.latency_counter - 1),
-                self.scaler.req.valid.eq(0),
-            ]
+            m.d.sync += self.latency_counter.eq(self.latency - 1)
+        with m.Elif(resp_fire & ~last):
+            m.d.sync += self.latency_counter.eq(self.latency_counter - 1)
+
+        with m.Switch(self.req.payload.actfn):
+            with m.Case(Activation.NONE):
+                m.d.comb += self.scaler.req.payload.a.eq(self.req.payload.data)
+            with m.Case(Activation.RELU):
+                m.d.comb += [act.eq(am.Mux(p[-1], 0, p)) for act, p in zip(self.scaler.req.payload.a, self.req.payload.data)]
 
         m.d.comb += [
             self.scaler.req.payload.b.eq(self.qmul.replicate(self.req.payload.data.shape().length)),
