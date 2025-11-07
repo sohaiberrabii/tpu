@@ -43,7 +43,7 @@ class Scaler(Component):
         with m.Elif(~self.resp.valid | self.resp.ready):
             m.d.sync += valid_muls.eq(0)
 
-        m.d.comb += self.req.ready.eq(~valid_muls | self.resp.ready)
+        m.d.comb += self.req.ready.eq(~self.resp.valid | self.resp.ready)
 
         return m
 
@@ -51,11 +51,8 @@ class ScalerConfig(data.StructLayout):
     def __init__(self, qmul_shape, zp_shape, shamt_width):
         super().__init__({"qmul": qmul_shape, "shamt": shamt_width, "zp": zp_shape})
 
-#TODO: latency -> pipeline depth / in-flight
-#FIXME: done is actually last
 class ActivationUnit(Component):
-    def __init__(self, src_layout, dst_layout, addr_width, latency=2):
-        assert latency == 2, "only latency=2 is currently supported" #TODO:
+    def __init__(self, src_layout, dst_layout, addr_width):
         assert isinstance(src_layout, data.ArrayLayout) and isinstance(dst_layout, data.ArrayLayout)
 
         self.qmul = am.Signal(src_layout.elem_shape)
@@ -63,10 +60,6 @@ class ActivationUnit(Component):
         self.zp = am.Signal(dst_layout.elem_shape)
 
         self.scaler = Scaler(src_layout, dst_layout, max_shift=src_layout.elem_shape.width * 2 - 1)
-
-        self.latency = latency
-        self.latency_counter = am.Signal(range(self.latency))
-        self.sync_shifter = Shifter(addr_width, latency) # synchronize addr payload with data processing
 
         super().__init__({
             "config": In(stream.Signature(ScalerConfig(self.qmul.shape(), self.zp.shape(), self.shamt.shape()), always_ready=True)),
@@ -84,25 +77,17 @@ class ActivationUnit(Component):
                 self.zp.eq(self.config.payload.zp),
             ]
 
-        m.submodules.sync_shifter = self.sync_shifter
         m.submodules.scaler = self.scaler
 
-        req_fire = self.req.valid & self.req.ready
-        resp_fire = self.resp.valid & self.resp.ready
-        last = self.latency_counter == 0
+        inflight = am.Signal()
+        addrq = am.Signal.like(self.resp.payload.addr)
+        with m.If(self.req.valid & self.req.ready):
+            m.d.sync += [addrq.eq(self.req.payload.addr), inflight.eq(1)]
+        with m.Elif(inflight & (~self.resp.valid | self.resp.ready)):
+            m.d.sync += inflight.eq(0)
 
-        m.d.comb += [
-            self.done.eq(last & self.scaler.req.ready),
-            self.sync_shifter.en.eq(req_fire | resp_fire),
-            self.sync_shifter.d.eq(self.req.payload.addr),
-            self.resp.payload.addr.eq(self.sync_shifter.q),
-        ]
-
-        m.d.comb += self.scaler.req.valid.eq(self.req.valid)
-        with m.If(req_fire):
-            m.d.sync += self.latency_counter.eq(self.latency - 1)
-        with m.Elif(resp_fire & ~last):
-            m.d.sync += self.latency_counter.eq(self.latency_counter - 1)
+        with m.If((~self.resp.valid | self.resp.ready) & inflight):
+            m.d.sync += self.resp.payload.addr.eq(addrq)
 
         with m.Switch(self.req.payload.actfn):
             with m.Case(Activation.NONE):
@@ -116,8 +101,10 @@ class ActivationUnit(Component):
             self.scaler.req.payload.zp.eq(self.zp),
             self.scaler.resp.ready.eq(self.resp.ready),
 
-            self.req.ready.eq(~self.scaler.req.valid | self.scaler.req.ready),
+            self.scaler.req.valid.eq(self.req.valid),
+            self.req.ready.eq(self.scaler.req.ready),
             self.resp.valid.eq(self.scaler.resp.valid),
             self.resp.payload.data.eq(self.scaler.resp.payload),
+            self.done.eq(~(self.resp.valid | inflight)),
         ]
         return m
