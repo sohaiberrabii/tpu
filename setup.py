@@ -16,7 +16,7 @@ setup(
         "test": [ 
             "pytest",
             "numpy",
-            "cocotb @ git+https://github.com/cocotb/cocotb.git",
+            "cocotb==2.0.0",
             "torchvision",
         ],
     },
