@@ -16,7 +16,7 @@ setup(
         "test": [ 
             "pytest",
             "numpy",
-            "cocotb==2.0.0",
+            "cocotb>=2.0.0",
             "torchvision",
         ],
     },

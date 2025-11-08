@@ -53,7 +53,8 @@ def generate_bitstream(config, board="pynq-z2", build_dir=None):
     if res.returncode:
         raise RuntimeError(res.stderr)
 
-    bit, hwh = next(build_dir.rglob("*.bit")).rename(build_dir / "tpu.bit"), next(build_dir.rglob("*.hwh")).rename(build_dir / "tpu.hwh")
+    bit = build_dir.joinpath("tpu_proj", "tpu_proj.runs", "impl_1", "tpu_wrapper.bit").rename(build_dir / "tpu.bit")
+    hwh = build_dir.joinpath("tpu_proj", "tpu_proj.gen", "sources_1", "bd", "tpu", "hw_handoff", "tpu.hwh").rename(build_dir / "tpu.hwh")
     return bit, hwh
 
 def deploy(config_fn, bit_fn, hwh_fn, remote_dir=""):

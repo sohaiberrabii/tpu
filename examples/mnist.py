@@ -19,6 +19,7 @@ from test.cocotb_test.helpers import CocotbModel, TPUAxiInterface, cocotb_run
 
 ASSETDIR = Path(__file__).parent / "assets"
 ASSETDIR.mkdir(exist_ok=True)
+TRAIN = int(os.getenv("TRAIN", 1))
 COCOTB = int(os.getenv("COCOTB", 0))
 
 class SimpleNN(nn.Module):
@@ -54,13 +55,6 @@ def test(model, loader, device):
         pred = output.argmax(dim=1, keepdim=True)
         correct += pred.eq(target.view_as(pred)).sum().item()
     return correct
-
-def loader(x, y, bs=64):
-    for i in range(-(-len(x) // bs)):
-        batch = x[i * bs:(i + 1) * bs]
-        batch = batch.astype(np.float32) / 255.0
-        batch = resize_bilinear(batch.reshape(-1, 28, 28), 12, 12)
-        yield batch, y[i * bs:(i + 1) * bs]
 
 @torch.no_grad
 def quantize(model, act_stats, config):
@@ -110,30 +104,11 @@ def quantize(model, act_stats, config):
 
     return qlayers, params_blob
 
-RESETC = "\033[39m\033[49m"
-GREEN = "\033[38;2;44;160;44m"
-RED = "\033[38;2;214;39;40m"
-
-def display_image(dat, size=(28, 28)):
-    """Expects uint8 data"""
-    def bg(gs): return f"\033[48;2;{gs};{gs};{gs}m"
-    def fg(gs): return f"\033[38;2;{gs};{gs};{gs}m"
-    num_rows, num_cols = size
-    for i in range(0, num_rows, 2):
-        print("".join(f"{fg(int(dat[i * num_cols + j]))}{bg(int(dat[(i + 1) * num_cols + j]))}▀" for j in range(num_cols)) + RESETC)
-
-def display_outputs(output, expected, min, max):
-    def bar(x, color=""):
-        return color + "▄" * round(20 * (x.astype(np.int32) - min) / (max - min)) + RESETC + f" {x}"
-    actual = np.argmax(output)
-    for i, x in enumerate(output):
-        print(f"{i}▕ {bar(x, color=GREEN if i == expected else (RED if i == actual else ''))}")
-
 def get_act_stats(model, xcalib):
     import torch
     assert hasattr(model, "layers")
     def activation_observer(name, act_stats, relu):
-        def hook(module, input, output):
+        def hook(_, input, output):
             inmn, inmx = input[0].min().item(), input[0].max().item()
             outmn, outmx = output.min().item(), output.max().item()
             outmn = max(0, outmn) if relu else outmn
@@ -162,26 +137,33 @@ async def mnist_tb(dut):
     with open(Path(__file__).parent / "build" / "config.json") as f:
         config = TPUConfig.fromdict(json.load(f))
 
-    tpu_axi = TPUAxiInterface(dut)
+    qmin, qmax = dtype_to_bounds(config.act_dtype)
+    s, z = 1.0 / (qmax - qmin), qmin
+    *_, x_test, y_test = fetch_mnist()
+
+    # numpy quantized baseline
+    npmodel = NumpyModel(ASSETDIR / "model.json", ASSETDIR / "tensors.bin", config)
+    x, _ = next(iter(loader(x_test, y_test, bs=10000)))
+    xq = (x / s + z).astype(config.act_dtype.numpy)
+    np_y = npmodel(xq)
+    correct = sum(np_y.argmax(axis=-1) == y_test)
+    print(f"INT{config.act_dtype.width}: {correct}/{len(x_test)} correct predictions, {100.0 * correct / len(x_test):.2f}% accuracy")
+
+    # cocotb sim
+    tpu_axi = TPUAxiInterface(dut, rand=True)
     await tpu_axi.init()
     await tpu_axi.reset()
     tb_model = CocotbModel(tpu_axi, config, ASSETDIR / "model.json", ASSETDIR / "tensors.bin")
-
-    *_, x, y = fetch_mnist()
-    qmin, qmax = dtype_to_bounds(config.act_dtype)
-    s, z = 1.0 / (qmax - qmin), qmin
     correct, total = 0, 0
     pbar = tqdm(total=10000)
-    for xb, yb in loader(x, y, bs=64):
+    for i, (xb, yb) in enumerate(loader(x_test, y_test, bs=64)):
         xq = (xb / s + z).astype(config.act_dtype.numpy)
-        # display_image(xb[0].reshape(-1).astype(np.int32) + 128, size=(12, 12))
         tb_y = await tb_model(xq)
-        # display_outputs(tb_y[0], yb[0], qmin, qmax)
+        np.testing.assert_array_equal(tb_y, np_y[i * 64:(i + 1) * 64])
         correct += sum(tb_y.argmax(axis=-1) == yb)
         total += len(xb)
         pbar.desc = f"COCOTB: {correct}/{total} correct predictions"
         pbar.update(len(xb), close=total==len(x))
-
     print(f"COCOTB: {correct}/{len(x)} correct predictions, {100.0 * correct / len(x):.2f}% accuracy")
 
 
@@ -192,16 +174,17 @@ if __name__ == "__main__":
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=0.0001)
 
-    print("Training")
-    best_acc = 0.
-    for epoch in (pbar := tqdm(range(1, 51))):
-        train(model, loader(x_train, y_train, bs=64), optimizer, criterion, device)
-        correct = test(model, loader(x_test, y_test, bs=10000), device)
-        acc = 100.0 * correct / len(x_test)
-        if acc > best_acc:
-            best_acc = acc
-            torch.save(model.state_dict(), ASSETDIR / "model.pth")
-        pbar.desc = f"Epoch: {epoch}, Test accuracy: {acc:.2f}%"
+    if TRAIN:
+        print("Training")
+        best_acc = 0.
+        for epoch in (pbar := tqdm(range(1, 51))):
+            train(model, loader(x_train, y_train, bs=64), optimizer, criterion, device)
+            correct = test(model, loader(x_test, y_test, bs=10000), device)
+            acc = 100.0 * correct / len(x_test)
+            if acc > best_acc:
+                best_acc = acc
+                torch.save(model.state_dict(), ASSETDIR / "model.pth")
+            pbar.desc = f"Epoch: {epoch}, Test accuracy: {acc:.2f}%"
 
     state_dict = torch.load(ASSETDIR / "model.pth", map_location=device)
     model.load_state_dict(state_dict)
@@ -218,15 +201,6 @@ if __name__ == "__main__":
     with open(ASSETDIR / "model.json", "w") as fm, open(ASSETDIR / "tensors.bin", "wb") as ft:
         ft.write(tensorsbin)
         json.dump(qlayers, fm, indent=2)
-
-    # numpy quantized baseline
-    npmodel = NumpyModel(ASSETDIR / "model.json", ASSETDIR / "tensors.bin", config)
-    x, _ = next(iter(loader(x_test, y_test, bs=10000)))
-    sa, za = qparams(act_stats["layer.1"]["input"], config.act_dtype)
-    xq = (x / sa + za).astype(config.act_dtype.numpy)
-    y = npmodel(xq)
-    correct = sum(y.argmax(axis=-1) == y_test)
-    print(f"INT{config.act_dtype.width}: {correct}/{len(x_test)} correct predictions, {100.0 * correct / len(x_test):.2f}% accuracy")
 
     # generate the verilog and run cocotb simulation
     if COCOTB:

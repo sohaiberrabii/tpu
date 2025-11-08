@@ -270,3 +270,30 @@ class NumpyModel:
 
     def _extract_tensor(self, info):
         return np.frombuffer(self.tensors[info["offset"]:info["offset"] + info["size"]], dtype=np.uint8)
+
+RESETC = "\033[39m\033[49m"
+GREEN = "\033[38;2;44;160;44m"
+RED = "\033[38;2;214;39;40m"
+
+def display_image(dat, size=(28, 28)):
+    """Expects uint8 data"""
+    def bg(gs): return f"\033[48;2;{gs};{gs};{gs}m"
+    def fg(gs): return f"\033[38;2;{gs};{gs};{gs}m"
+    num_rows, num_cols = size
+    for i in range(0, num_rows, 2):
+        print("".join(f"{fg(int(dat[i * num_cols + j]))}{bg(int(dat[(i + 1) * num_cols + j]))}▀" for j in range(num_cols)) + RESETC)
+
+def display_outputs(output, expected, min, max):
+    def bar(x, color=""):
+        return color + "▄" * round(20 * (x.astype(np.int32) - min) / (max - min)) + RESETC + f" {x}"
+    actual = np.argmax(output)
+    for i, x in enumerate(output):
+        print(f"{i}▕ {bar(x, color=GREEN if i == expected else (RED if i == actual else ''))}")
+    print()
+
+def loader(x, y, bs=64):
+    for i in range(-(-len(x) // bs)):
+        batch = x[i * bs:(i + 1) * bs]
+        batch = batch.astype(np.float32) / 255.0
+        batch = resize_bilinear(batch.reshape(-1, 28, 28), 12, 12)
+        yield batch, y[i * bs:(i + 1) * bs]
