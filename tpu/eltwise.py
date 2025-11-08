@@ -14,28 +14,30 @@ class Scaler(Component):
     """Reg((Reg(a * b) >> shamt) + zp)
     """
     def __init__(self, in_shape, out_shape, max_shift=63):
-        assert isinstance(in_shape, data.ArrayLayout) and isinstance(out_shape, data.ArrayLayout) and in_shape.length == out_shape.length
+        assert isinstance(in_shape, data.ArrayLayout) and (
+                isinstance(out_shape, data.ArrayLayout) and in_shape.length == out_shape.length)
 
         out_width = out_shape.elem_shape.width
         self.min, self.max = -(1 << out_width - 1), (1 << out_width - 1) - 1
-        self.muls = am.Signal(data.ArrayLayout(am.Shape(in_shape.elem_shape.width * 2, signed=in_shape.elem_shape.signed), in_shape.length))
+        self.muls = am.Signal(data.ArrayLayout(
+            am.Shape(in_shape.elem_shape.width * 2, signed=in_shape.elem_shape.signed), in_shape.length))
 
         super().__init__({
             "req": In(stream.Signature(data.StructLayout({
                 "a": in_shape, "b": in_shape, "zp": out_shape.elem_shape, "shamt": ceil_log2(max_shift + 1)}))),
             "resp": Out(stream.Signature(out_shape)),
+            "done": Out(1),
         })
     def elaborate(self, _):
         m = am.Module()
         assert all(isinstance(x.shape(), data.ArrayLayout) for x in [self.req.payload.a, self.req.payload.b, self.resp.payload])
 
         valid_muls = am.Signal()
-        with m.If(valid_muls & (~self.resp.valid | self.resp.ready)):
-            m.d.sync += [resp.eq(clip((p >> self.req.payload.shamt) + self.req.payload.zp, self.min, self.max))
-                for resp, p in zip(self.resp.payload, self.muls)]
-
         with m.If(~self.resp.valid | self.resp.ready):
             m.d.sync += self.resp.valid.eq(valid_muls)
+            with m.If(valid_muls):
+                m.d.sync += [resp.eq(clip((p >> self.req.payload.shamt) + self.req.payload.zp, self.min, self.max))
+                    for resp, p in zip(self.resp.payload, self.muls)]
 
         with m.If(self.req.valid & self.req.ready):
             m.d.sync += [p.eq(a * b) for p, a, b in zip(self.muls, self.req.payload.a, self.req.payload.b)]
@@ -43,7 +45,10 @@ class Scaler(Component):
         with m.Elif(~self.resp.valid | self.resp.ready):
             m.d.sync += valid_muls.eq(0)
 
-        m.d.comb += self.req.ready.eq(~self.resp.valid | self.resp.ready)
+        m.d.comb += [
+            self.req.ready.eq(~valid_muls | ~self.resp.valid | self.resp.ready),
+            self.done.eq(~valid_muls & ~self.resp.valid),
+        ]
 
         return m
 
@@ -60,6 +65,7 @@ class ActivationUnit(Component):
         self.zp = am.Signal(dst_layout.elem_shape)
 
         self.scaler = Scaler(src_layout, dst_layout, max_shift=src_layout.elem_shape.width * 2 - 1)
+        self.sync_shifter = Shifter(addr_width, 2) #TODO: make this generic along with scaler pipeline depth
 
         super().__init__({
             "config": In(stream.Signature(ScalerConfig(self.qmul.shape(), self.zp.shape(), self.shamt.shape()), always_ready=True)),
@@ -78,33 +84,33 @@ class ActivationUnit(Component):
             ]
 
         m.submodules.scaler = self.scaler
+        m.submodules.sync_shifter = self.sync_shifter
 
-        inflight = am.Signal()
-        addrq = am.Signal.like(self.resp.payload.addr)
         with m.If(self.req.valid & self.req.ready):
-            m.d.sync += [addrq.eq(self.req.payload.addr), inflight.eq(1)]
-        with m.Elif(inflight & (~self.resp.valid | self.resp.ready)):
-            m.d.sync += inflight.eq(0)
-
-        with m.If((~self.resp.valid | self.resp.ready) & inflight):
-            m.d.sync += self.resp.payload.addr.eq(addrq)
-
-        with m.Switch(self.req.payload.actfn):
-            with m.Case(Activation.NONE):
-                m.d.comb += self.scaler.req.payload.a.eq(self.req.payload.data)
-            with m.Case(Activation.RELU):
-                m.d.comb += [act.eq(am.Mux(p[-1], 0, p)) for act, p in zip(self.scaler.req.payload.a, self.req.payload.data)]
+            m.d.sync += [
+                self.sync_shifter.d.eq(self.req.payload.addr),
+                self.scaler.req.valid.eq(1),
+            ]
+            with m.Switch(self.req.payload.actfn):
+                with m.Case(Activation.NONE):
+                    m.d.sync += self.scaler.req.payload.a.eq(self.req.payload.data)
+                with m.Case(Activation.RELU):
+                    m.d.sync += [act.eq(am.Mux(p[-1], 0, p)) for act, p in zip(self.scaler.req.payload.a, self.req.payload.data)]
+        with m.Elif(self.scaler.req.ready):
+            m.d.sync += self.scaler.req.valid.eq(0)
 
         m.d.comb += [
+            self.sync_shifter.en.eq(self.scaler.req.ready),
+            self.resp.payload.addr.eq(self.sync_shifter.q),
+
             self.scaler.req.payload.b.eq(self.qmul.replicate(self.req.payload.data.shape().length)),
             self.scaler.req.payload.shamt.eq(self.shamt),
             self.scaler.req.payload.zp.eq(self.zp),
             self.scaler.resp.ready.eq(self.resp.ready),
 
-            self.scaler.req.valid.eq(self.req.valid),
             self.req.ready.eq(self.scaler.req.ready),
             self.resp.valid.eq(self.scaler.resp.valid),
             self.resp.payload.data.eq(self.scaler.resp.payload),
-            self.done.eq(~(self.resp.valid | inflight)),
+            self.done.eq(self.scaler.done & ~self.scaler.req.valid),
         ]
         return m

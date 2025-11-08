@@ -191,7 +191,7 @@ class ExecuteController(Component):
 
         with m.If(self.lat_q.valid & last_output):
             m.d.sync += [self.latency_counter.eq(self.lat_q.count), self.lat_q.valid.eq(0)]
-        with m.Elif((self.repeat_counter ==  1) & last_output):
+        with m.Elif((self.repeat_counter == 1) & last_output):
             m.d.sync += self.latency_counter.eq(self.latency - 1)
         with m.Elif(~last_output): #NOTE: only correct because the pipeline spad -> sa -> acc is not stallable.
             m.d.sync += self.latency_counter.eq(self.latency_counter - 1)

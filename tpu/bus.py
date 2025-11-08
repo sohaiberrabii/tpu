@@ -57,7 +57,6 @@ class AXI4LiteCSRBridge(wiring.Component):
         self.csr_bus = csr_bus
         data_width = csr_bus.data_width if data_width is None else data_width
 
-        # ratio  = data_width // csr_bus.data_width
         axi4lite_sig = AXI4Lite(addr_width=csr_bus.addr_width + 2, data_width=data_width)
         super().__init__({"bus": In(axi4lite_sig)})
 
