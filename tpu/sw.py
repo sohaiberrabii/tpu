@@ -236,10 +236,10 @@ def resize_bilinear(x, out_h, out_w, half_pixel_centers=False):
     return output
 
 #NOTE: acc_dtype need to be a numpy supported dtype for this to match the hardware
-def qmatmul(a, b, c, zd, qmul, shamt, act_dtype, acc_dtype, actfn=Activation.RELU):
+def qmatmul(a, b, c, zp, qmul, shamt, act_dtype, acc_dtype, actfn=Activation.RELU):
     out = a.astype(acc_dtype.numpy) @ b + c
     out = np.maximum(out, 0) if actfn == Activation.RELU else out
-    out = (qmul.astype(np.int64) * out.astype(np.int64) >> shamt) + zd #FIXME: int64->2 * acc_dtype.width
+    out = (qmul.astype(np.int64) * out.astype(np.int64) >> shamt) + zp #FIXME: int64->2 * acc_dtype.width
     return np.clip(out, *dtype_to_bounds(act_dtype)).astype(act_dtype.numpy)
 
 class NumpyModel:
@@ -259,7 +259,7 @@ class NumpyModel:
                 qparams = {k: np.array(v) for k, v in op["qparams"].items()}
                 b = unpack_weights(self._extract_tensor(op["args"]["weight"]), *op["args"]["weight"]["shape"], self.config)
                 c = unpack_bias(self._extract_tensor(op["args"]["bias"]), op["args"]["bias"]["shape"][1], self.config)
-                return functools.partial(qmatmul, b=b, c=c, zd=qparams["output_zp"], qmul=qparams["qmul"], shamt=qparams["shamt"],
+                return functools.partial(qmatmul, b=b, c=c, zp=qparams["output_zp"], qmul=qparams["qmul"], shamt=qparams["shamt"],
                     act_dtype=self.config.act_dtype, acc_dtype=self.config.acc_dtype, actfn=Activation[op["act"]])
             case "flatten":
                 def flatten(x):
