@@ -61,7 +61,7 @@ def run(instrs, config: TPUConfig, mem):
 
                         out = pack(acc_mem[acc_addr:acc_addr + reps], config.acc_dtype)
                         out = np.maximum(out, 0) if actfn == Activation.RELU else out
-                        out = (qmul.astype(np.int64) * out.astype(np.int64) >> shamt) + zp #FIXME: int64->2 * acc_dtype.width
+                        out = (qmul * out.astype(np.int64) >> shamt) + zp #FIXME: int64->2 * acc_dtype.width
                         out = np.clip(out, *dtype_to_bounds(config.act_dtype)).astype(config.act_dtype.numpy)
                         act_mem[act_addr:act_addr + reps] = unpack(out, config.act_dtype)
                         

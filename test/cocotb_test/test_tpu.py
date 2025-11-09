@@ -53,25 +53,8 @@ async def test_matmul(dut):
 
     for i in range(10):
         m, k, n = [random.randint(8, 180) for _ in range(3)]
-        actfn = random.choice(list(Activation))
         print(f"Run {i} with dims (M, K, N)={m, k, n}")
-        actbuf, wbuf, biasbuf, actfn, zd, shamt, qmul, expected = matmul_case(m, k, n, config)
-        data_bytes = wbuf + biasbuf + actbuf
-        tpu_axi.memory[:len(data_bytes)] = data_bytes
-
-        act_offset = len(wbuf) + len(biasbuf)
-        res_offset = len(data_bytes)
-        instrs = tpu_matmul(m, k, n, config, zd, shamt.item(), qmul.item(), actfn=actfn,
-            a_haddr=act_offset, c_haddr=len(wbuf), d_haddr=res_offset)
-
-        #FIXME: encoding is slow for large number of instrs
-        encoded_instrs = [config.isa_layout.const(instr).as_bits() for instr in instrs]
-        ibuf = repack(encoded_instrs, config.isa_layout.size, config.host_data_width, aligned=True)
-        instr_bytes = [byte for word in ibuf for byte in unpacked(word, config.host_data_width, 8)]
-        instr_baseaddr = len(tpu_axi.memory) - len(instr_bytes)
-        tpu_axi.memory[instr_baseaddr:] = instr_bytes
-
-        result_size = m * ceildiv(n, config.cols) * aligned_size(config.act_dtype.width * config.rows, config.host_data_width) // 8
-        await run_tpu(tpu_axi, config, len(instrs), instr_baseaddr)
+        (instr_baseaddr, ninstrs), (res_offset, result_size), expected = matmul_case(m, k, n, config, tpu_axi.memory)
+        await run_tpu(tpu_axi, config, ninstrs, instr_baseaddr)
         result = unpack_activations(tpu_axi.memory[res_offset:res_offset + result_size], m, n, config)
         np.testing.assert_array_equal(result, expected)
