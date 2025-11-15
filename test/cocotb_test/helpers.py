@@ -161,6 +161,8 @@ class TPUAxiInterface:
         for k, v in self.consumer_intfs.items():
             cocotb.start_soon(stream_consumer(self.dut.clk, v["queue"], **self._stream_payload(k, v["payload"]), rand=self.rand))
 
+        await self.reset()
+
     async def read_csr(self, addr):
         await self.producer_intfs["ctrl__ar"]["queue"].put({"addr": addr, "prot": 0})
         return (await self.consumer_intfs["ctrl__r"]["queue"].get())["data"]

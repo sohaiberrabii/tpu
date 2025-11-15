@@ -45,9 +45,9 @@ def test_tpu_standalone(dim, act_mem_depth, acc_mem_depth, weight_fifo_depth, in
 
 @cocotb.test()
 async def test_matmul(dut):
+    print("Matrix Multiplication tests")
     tpu_axi = TPUAxiInterface(dut, rand=True)
     await tpu_axi.init()
-    await tpu_axi.reset()
     with open(Path(__file__).parent / "build" / "config.json") as f:
         config = TPUConfig.fromdict(json.load(f))
 
