@@ -19,17 +19,17 @@ from tpu.sw import IntType
 
 @dataclass(frozen=True)
 class TPUConfig:
-    rows: int = 2
-    cols: int = 2
+    rows: int = 8
+    cols: int = 8
     weight_dtype: IntType = IntType(width=8, signed=True)
     act_dtype: IntType = IntType(width=8, signed=True)
     acc_dtype: IntType = IntType(width=32, signed=True)
     double_buffered: int = True
 
-    act_mem_depth: int = 8
-    acc_mem_depth: int = 8
-    weight_fifo_depth: int = 8
-    instr_fifo_depth: int = 8
+    act_mem_depth: int = 32
+    acc_mem_depth: int = 32
+    weight_fifo_depth: int = 32
+    instr_fifo_depth: int = 16
 
     host_data_width: int = 64
     host_addr_width: int = 32

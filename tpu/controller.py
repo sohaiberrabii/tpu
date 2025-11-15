@@ -190,7 +190,7 @@ class ExecuteController(Component):
             ]
 
         with m.If(self.lat_q.valid & last_output):
-            m.d.sync += [self.latency_counter.eq(self.lat_q.count), self.lat_q.valid.eq(0)]
+            m.d.sync += [self.latency_counter.eq(self.latency - 1 - self.lat_q.count), self.lat_q.valid.eq(0)]
         with m.Elif((self.repeat_counter == 1) & last_output):
             m.d.sync += self.latency_counter.eq(self.latency - 1)
         with m.Elif(~last_output): #NOTE: only correct because the pipeline spad -> sa -> acc is not stallable.
@@ -291,7 +291,7 @@ class ActivationController(Component):
         m.d.comb += [
             self.done.eq(self.req.ready & self.actfn_done),
             self.req.ready.eq(req_read_done & req_output_done),
-            self.src_req.valid.eq(~req_read_done),
+            self.src_req.valid.eq(~req_read_done & self.dst.ready), #acc mem is not stallable, only issue request if dst is also ready
 
             self.src_resp.ready.eq(self.dst.ready),
             self.dst.valid.eq(self.src_resp.valid),
