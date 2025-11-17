@@ -5,6 +5,8 @@ from amaranth.utils import ceil_log2
 
 from tpu.isa import Activation, AccMode
 from tpu.helpers import Shifter
+from tpu.memory import AccWriteIO, MemoryReadIO, MemoryWriteIO
+
 
 class Request(data.StructLayout):
     def __init__(self, src_addr_width, dst_addr_width, max_repeats, extra=None):
@@ -19,12 +21,12 @@ class LoadController(Component):
             "req": In(stream.Signature(Request(src_addr_width, dst_addr_width, max_repeats))),
             "src_req":  Out(stream.Signature(data.StructLayout({"addr": src_addr_width, "reps": ceil_log2(max_repeats + 1)}))),
             "src_resp": In(stream.Signature(width)),
-            "dst": Out(stream.Signature(data.StructLayout({"addr": dst_addr_width, "data": width}))),
+            "dst": Out(MemoryWriteIO(dst_addr_width, width)),
 
             "acc_req": In(stream.Signature(Request(src_addr_width, acc_dst_addr_width, acc_max_repeats))),
             "acc_src_req":  Out(stream.Signature(data.StructLayout({"addr": src_addr_width, "reps": ceil_log2(acc_max_repeats + 1)}))),
             "acc_src_resp": In(stream.Signature(acc_width)),
-            "acc_dst": Out(stream.Signature(data.StructLayout({"addr": acc_dst_addr_width, "data": acc_width}))),
+            "acc_dst": Out(AccWriteIO(acc_dst_addr_width, acc_width)),
         })
 
     def elaborate(self, _):
@@ -36,15 +38,15 @@ class LoadController(Component):
             self.src_req.payload.addr.eq(self.req.payload.src_addr),
             self.src_req.payload.reps.eq(self.req.payload.reps),
 
-            self.src_resp.ready.eq(self.dst.ready),
-            self.dst.valid.eq(self.src_resp.valid),
-            self.dst.payload.data.eq(self.src_resp.payload),
+            self.src_resp.ready.eq(self.dst.req.ready),
+            self.dst.req.valid.eq(self.src_resp.valid),
+            self.dst.req.payload.data.eq(self.src_resp.payload),
         ]
 
         with m.If(self.req.valid & self.req.ready):
-            m.d.sync += self.dst.payload.addr.eq(self.req.payload.dst_addr)
-        with m.Elif(self.dst.valid & self.dst.ready):
-            m.d.sync += self.dst.payload.addr.eq(self.dst.payload.addr + 1)
+            m.d.sync += self.dst.req.payload.addr.eq(self.req.payload.dst_addr)
+        with m.Elif(self.dst.req.valid & self.dst.req.ready):
+            m.d.sync += self.dst.req.payload.addr.eq(self.dst.req.payload.addr + 1)
 
         m.d.comb += [
             self.acc_req.ready.eq(self.acc_src_req.ready),
@@ -52,15 +54,17 @@ class LoadController(Component):
             self.acc_src_req.payload.addr.eq(self.acc_req.payload.src_addr),
             self.acc_src_req.payload.reps.eq(self.acc_req.payload.reps),
 
-            self.acc_src_resp.ready.eq(self.acc_dst.ready),
-            self.acc_dst.valid.eq(self.acc_src_resp.valid),
-            self.acc_dst.payload.data.eq(self.acc_src_resp.payload),
+            self.acc_src_resp.ready.eq(self.acc_dst.req.ready),
+            self.acc_dst.req.valid.eq(self.acc_src_resp.valid),
+            self.acc_dst.req.payload.data.eq(self.acc_src_resp.payload),
+            self.acc_dst.req.payload.acc.eq(AccMode.NO),
+            self.acc_dst.req.payload.raddr.eq(0),
         ]
 
         with m.If(self.acc_req.valid & self.acc_req.ready):
-            m.d.sync += self.acc_dst.payload.addr.eq(self.acc_req.payload.dst_addr)
-        with m.Elif(self.acc_dst.valid & self.acc_dst.ready):
-            m.d.sync += self.acc_dst.payload.addr.eq(self.acc_dst.payload.addr + 1)
+            m.d.sync += self.acc_dst.req.payload.waddr.eq(self.acc_req.payload.dst_addr)
+        with m.Elif(self.acc_dst.req.valid & self.acc_dst.req.ready):
+            m.d.sync += self.acc_dst.req.payload.waddr.eq(self.acc_dst.req.payload.waddr + 1)
         return m
 
 class StoreController(Component):
@@ -69,8 +73,7 @@ class StoreController(Component):
         self.ack_counter = am.Signal(range(max_repeats + 1))
         super().__init__({
             "req": In(stream.Signature(Request(src_addr_width, dst_addr_width, max_repeats))),
-            "src_req":  Out(stream.Signature(src_addr_width)),
-            "src_resp": In(stream.Signature(width, always_ready=True)), #FIXME:
+            "read": In(MemoryReadIO(src_addr_width, width, resp_always_ready=True)),
             "dst_req": Out(stream.Signature(data.StructLayout({"addr": dst_addr_width, "reps": ceil_log2(max_repeats + 1)}))),
             "dst": Out(stream.Signature(data.StructLayout({"data": width, "last": 1}))),
         })
@@ -81,12 +84,12 @@ class StoreController(Component):
         with m.If(self.req.valid & self.req.ready):
             m.d.sync += [
                 self.repeat_counter.eq(self.req.payload.reps),
-                self.src_req.payload.eq(self.req.payload.src_addr)
+                self.read.req.payload.addr.eq(self.req.payload.src_addr)
             ]
-        with m.Elif(self.src_req.valid & self.src_req.ready):
+        with m.Elif(self.read.req.valid & self.read.req.ready):
             m.d.sync += [
                 self.repeat_counter.eq(self.repeat_counter - 1),
-                self.src_req.payload.eq(self.src_req.payload + 1)
+                self.read.req.payload.addr.eq(self.read.req.payload.addr + 1)
             ]
 
         with m.If(self.req.valid & self.req.ready):
@@ -99,24 +102,24 @@ class StoreController(Component):
             ]
 
         #NOTE: this is needed because the scratchpad read.resp stream is not stallable.
-        src_resp_hs = self.src_resp.valid & self.src_resp.ready
-        src_resp_q = am.Signal(data.StructLayout({"valid": 1, "payload": len(self.src_resp.payload)}))
-        with m.If(src_resp_hs &  ~self.dst.ready & ~src_resp_q.valid):
-            m.d.sync += [src_resp_q.valid.eq(1), src_resp_q.payload.eq(self.src_resp.payload)]
-        with m.Elif(src_resp_q.valid & self.dst.ready):
-            m.d.sync += src_resp_q.valid.eq(0)
+        read_resp_hs = self.read.resp.valid & self.read.resp.ready
+        read_resp_q = am.Signal(data.StructLayout({"valid": 1, "payload": len(self.read.resp.payload.data)}))
+        with m.If(read_resp_hs &  ~self.dst.ready & ~read_resp_q.valid):
+            m.d.sync += [read_resp_q.valid.eq(1), read_resp_q.payload.eq(self.read.resp.payload)]
+        with m.Elif(read_resp_q.valid & self.dst.ready):
+            m.d.sync += read_resp_q.valid.eq(0)
 
         src_req_done = self.repeat_counter == 0
         m.d.comb += [
             self.req.ready.eq(src_req_done & (self.ack_counter == 0) & self.dst_req.ready),
-            self.src_req.valid.eq(~src_req_done & self.dst.ready),
+            self.read.req.valid.eq(~src_req_done & self.dst.ready),
 
             self.dst_req.valid.eq(self.req.valid),
             self.dst_req.payload.addr.eq(self.req.payload.dst_addr),
             self.dst_req.payload.reps.eq(self.req.payload.reps),
 
-            self.dst.valid.eq(self.src_resp.valid | src_resp_q.valid),
-            self.dst.payload.data.eq(am.Mux(src_resp_q.valid, src_resp_q.payload, self.src_resp.payload)),
+            self.dst.valid.eq(self.read.resp.valid | read_resp_q.valid),
+            self.dst.payload.data.eq(am.Mux(read_resp_q.valid, read_resp_q.payload, self.read.resp.payload)),
             self.dst.payload.last.eq(self.ack_counter == 1),
         ]
 
@@ -141,12 +144,10 @@ class ExecuteController(Component):
         self.lat_q = am.Signal(data.StructLayout({"count": range(self.latency), "valid": 1}))
 
         super().__init__({
-            "req":          In(stream.Signature(ExecuteRequest(src_addr_width, dst_addr_width, max_repeats))),
-            "input_resp":   In(stream.Signature(input_width, always_ready=True)),
-            "input_req":    Out(stream.Signature(src_addr_width)),
-            "write_output": Out(stream.Signature(data.StructLayout({
-                "raddr": dst_addr_width, "waddr": dst_addr_width, "data": output_width, "acc": AccMode}))),
-            "done": Out(1),
+            "req":   In(stream.Signature(ExecuteRequest(src_addr_width, dst_addr_width, max_repeats))),
+            "read":  Out(MemoryReadIO(src_addr_width, input_width, resp_always_ready=True)),
+            "write": Out(AccWriteIO(dst_addr_width, output_width)),
+            "done":  Out(1),
         })
 
     def elaborate(self, _):
@@ -159,9 +160,9 @@ class ExecuteController(Component):
         m.d.comb += [
             self.done.eq(self.req.ready & last_output),
             self.req.ready.eq(req_read_done & ~self.req_q.valid),
-            self.input_req.valid.eq(~req_read_done),
-            self.valid_shifter.d.eq(self.input_resp.valid),
-            self.write_output.valid.eq(self.valid_shifter.q),
+            self.read.req.valid.eq(~req_read_done),
+            self.valid_shifter.d.eq(self.read.resp.valid),
+            self.write.req.valid.eq(self.valid_shifter.q),
         ]
 
         # source address control
@@ -169,12 +170,12 @@ class ExecuteController(Component):
         with m.If(self.req.valid & self.req.ready):
             m.d.sync += [
                 self.repeat_counter.eq(self.req.payload.reps),
-                self.input_req.payload.eq(self.req.payload.src_addr),
+                self.read.req.payload.addr.eq(self.req.payload.src_addr),
             ]
-        with m.Elif(self.input_req.valid & self.input_req.ready):
+        with m.Elif(self.read.req.valid & self.read.req.ready):
             m.d.sync += [
                 self.repeat_counter.eq(self.repeat_counter - 1),
-                self.input_req.payload.eq(self.input_req.payload + 1),
+                self.read.req.payload.addr.eq(self.read.req.payload.addr + 1),
             ]
 
         # destination address control
@@ -199,18 +200,18 @@ class ExecuteController(Component):
         with m.If(last_output & self.req_q.valid):
             m.d.sync += [
                 self.req_q.valid.eq(0),
-                self.write_output.payload.waddr.eq(self.req_q.dst_waddr),
-                self.write_output.payload.raddr.eq(self.req_q.dst_raddr),
-                self.write_output.payload.acc.eq(self.req_q.acc),
+                self.write.req.payload.waddr.eq(self.req_q.dst_waddr),
+                self.write.req.payload.raddr.eq(self.req_q.dst_raddr),
+                self.write.req.payload.acc.eq(self.req_q.acc),
             ]
         with m.Elif(last_output & self.req.valid & self.req.ready):
             m.d.sync += [
-                self.write_output.payload.raddr.eq(self.req.payload.dst_raddr),
-                self.write_output.payload.waddr.eq(self.req.payload.dst_waddr),
-                self.write_output.payload.acc.eq(self.req.payload.acc),
+                self.write.req.payload.raddr.eq(self.req.payload.dst_raddr),
+                self.write.req.payload.waddr.eq(self.req.payload.dst_waddr),
+                self.write.req.payload.acc.eq(self.req.payload.acc),
             ]
-        with m.Elif(self.write_output.valid & self.write_output.ready):
-            m.d.sync += self.write_output.payload.waddr.eq(self.write_output.payload.waddr + 1)
+        with m.Elif(self.write.req.valid & self.write.req.ready):
+            m.d.sync += self.write.req.payload.waddr.eq(self.write.req.payload.waddr + 1)
 
         return m
 
@@ -251,14 +252,14 @@ class ActivationController(Component):
         self.ack_counter = am.Signal(range(max_repeats + 1))
 
         super().__init__({
-            "req":      In(stream.Signature(ActivationRequest(src_addr_width, dst_addr_width, max_repeats))),
-            "src_req":  Out(stream.Signature(data.StructLayout({"addr": src_addr_width}))),
-            "src_resp": In(stream.Signature(data.StructLayout({"data": width}))),
-            "dst":      Out(stream.Signature(data.StructLayout({"addr": dst_addr_width, "data": width, "actfn": Activation}))),
+            "req": In(stream.Signature(ActivationRequest(src_addr_width, dst_addr_width, max_repeats))),
+            "src": Out(MemoryReadIO(src_addr_width, width)),
+            "dst": Out(stream.Signature(data.StructLayout({"addr": dst_addr_width, "data": width, "actfn": Activation}))),
 
             "actfn_done": In(1),
             "done":       Out(1),
         })
+
     def elaborate(self, _):
         m = am.Module()
 
@@ -268,12 +269,12 @@ class ActivationController(Component):
         with m.If(self.req.valid & self.req.ready):
             m.d.sync += [
                 self.repeat_counter.eq(self.req.payload.reps),
-                self.src_req.payload.addr.eq(self.req.payload.src_addr),
+                self.src.req.payload.addr.eq(self.req.payload.src_addr),
             ]
-        with m.Elif(self.src_req.valid & self.src_req.ready):
+        with m.Elif(self.src.req.valid & self.src.req.ready):
             m.d.sync += [
                 self.repeat_counter.eq(self.repeat_counter - 1),
-                self.src_req.payload.addr.eq(self.src_req.payload.addr + 1),
+                self.src.req.payload.addr.eq(self.src.req.payload.addr + 1),
             ]
 
         with m.If(self.req.valid & self.req.ready):
@@ -291,10 +292,10 @@ class ActivationController(Component):
         m.d.comb += [
             self.done.eq(self.req.ready & self.actfn_done),
             self.req.ready.eq(req_read_done & req_output_done),
-            self.src_req.valid.eq(~req_read_done & self.dst.ready), #acc mem is not stallable, only issue request if dst is also ready
+            self.src.req.valid.eq(~req_read_done & self.dst.ready), #acc mem is not stallable, only issue request if dst is also ready
 
-            self.src_resp.ready.eq(self.dst.ready),
-            self.dst.valid.eq(self.src_resp.valid),
-            self.dst.payload.data.eq(self.src_resp.payload.data),
+            self.src.resp.ready.eq(self.dst.ready),
+            self.dst.valid.eq(self.src.resp.valid),
+            self.dst.payload.data.eq(self.src.resp.payload.data),
         ]
         return m

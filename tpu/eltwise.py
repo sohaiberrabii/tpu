@@ -5,6 +5,7 @@ from amaranth.utils import ceil_log2
 
 from tpu.isa import Activation
 from tpu.helpers import Shifter
+from tpu.memory import MemoryWriteIO
 
 
 def clip(x, min, max):
@@ -70,7 +71,7 @@ class ActivationUnit(Component):
         super().__init__({
             "config": In(stream.Signature(ScalerConfig(self.qmul.shape(), self.zp.shape(), self.shamt.shape()), always_ready=True)),
             "req": In(stream.Signature(data.StructLayout({"addr": addr_width, "data": src_layout, "actfn": Activation}))),
-            "resp": Out(stream.Signature(data.StructLayout({"addr": addr_width, "data": dst_layout}))),
+            "write": Out(MemoryWriteIO(addr_width, dst_layout)),
             "done": Out(1),
         })
 
@@ -101,16 +102,16 @@ class ActivationUnit(Component):
 
         m.d.comb += [
             self.sync_shifter.en.eq(self.scaler.req.ready),
-            self.resp.payload.addr.eq(self.sync_shifter.q),
+            self.write.req.payload.addr.eq(self.sync_shifter.q),
 
             self.scaler.req.payload.b.eq(self.qmul.replicate(self.req.payload.data.shape().length)),
             self.scaler.req.payload.shamt.eq(self.shamt),
             self.scaler.req.payload.zp.eq(self.zp),
-            self.scaler.resp.ready.eq(self.resp.ready),
+            self.scaler.resp.ready.eq(self.write.req.ready),
 
             self.req.ready.eq(self.scaler.req.ready),
-            self.resp.valid.eq(self.scaler.resp.valid),
-            self.resp.payload.data.eq(self.scaler.resp.payload),
+            self.write.req.valid.eq(self.scaler.resp.valid),
+            self.write.req.payload.data.eq(self.scaler.resp.payload),
             self.done.eq(self.scaler.done & ~self.scaler.req.valid),
         ]
         return m

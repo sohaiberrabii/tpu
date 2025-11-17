@@ -13,7 +13,6 @@ import cocotb
 
 from amaranth.back.verilog import convert
 
-from tpu.isa import Activation
 from tpu.tpu import TPU, TPUConfig
 from tpu.sw import *
 from test.cocotb_test.helpers import cocotb_run, TPUAxiInterface, run_tpu

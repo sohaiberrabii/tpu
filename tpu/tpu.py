@@ -9,7 +9,7 @@ from amaranth_soc import csr
 from tpu.pe import PE, SystolicDelay
 from tpu.controller import ExecuteController, PreloadController, ActivationController, LoadController, StoreController
 from tpu.memory import Scratchpad, Accumulator, FixedPriorityArbiter
-from tpu.isa import ISALayout, AccMode
+from tpu.isa import ISALayout
 from tpu.decoder import InstructionDecoder
 from tpu import bus
 from tpu.bus import DMAReader, DMAWriter, Arbiter, AXI4Lite, AXI4LiteCSRBridge
@@ -63,31 +63,36 @@ class TPU(Component):
         act_addr_width = exact_log2(config.act_mem_depth)
         a_shape, b_shape, c_shape = config.act_dtype.shape, config.weight_dtype.shape, config.acc_dtype.shape
 
+        self.instr_fifo = fifo.SyncFIFO(width=config.isa_layout.size, depth=config.instr_fifo_depth)
         self.decoder = InstructionDecoder(a_shape, c_shape, config.host_addr_width, act_addr_width, acc_addr_width, maxreps, config.acc_max_reps)
-
-        self.acc_warb = FixedPriorityArbiter(2)
-        self.acc_mem = Accumulator(depth=config.acc_mem_depth, width=data.ArrayLayout(c_shape, config.cols))
         self.act_mem = Scratchpad(depth=config.act_mem_depth, width=config.act_dtype.width * config.rows)
         self.weight_fifo = fifo.SyncFIFO(width=config.weight_dtype.width * config.cols, depth=config.weight_fifo_depth)
-        self.instr_fifo = fifo.SyncFIFO(width=self.decoder.instr.payload.shape().size, depth=config.instr_fifo_depth)
+        self.acc_mem = Accumulator(depth=config.acc_mem_depth, width=data.ArrayLayout(c_shape, config.cols))
+
+        self.act_warb = FixedPriorityArbiter(self.act_mem.write.signature.flip())
+        self.act_rarb = FixedPriorityArbiter(self.act_mem.read.signature.flip())
 
         self.load_ctrl = LoadController(config.host_addr_width, act_addr_width, self.act_mem.width, maxreps,
             acc_addr_width, self.acc_mem.width, config.acc_max_reps)
-        self.act_mem.add_writer(self.load_ctrl.dst)
+        self.act_warb.add(self.load_ctrl.dst)
 
         self.sa = SystolicDelay(PE(a_shape, b_shape, c_shape, latency=1).tile(config.rows, config.cols), "a")
         self.actfn = ActivationUnit(self.acc_mem.width, data.ArrayLayout(a_shape, config.rows), act_addr_width)
-        self.act_mem.add_writer(self.actfn.resp)
+        self.act_warb.add(self.actfn.write)
 
         self.ex_ctrl = ExecuteController(
             act_addr_width, acc_addr_width, maxreps, a_shape.width * config.rows, c_shape.width * config.cols, self.sa.latency(("a", "cout")))
-        self.act_mem.add_reader(self.ex_ctrl.input_req, self.ex_ctrl.input_resp)
+        self.act_rarb.add(self.ex_ctrl.read)
 
         self.preload_ctrl = PreloadController(b_shape.width * config.cols, config.rows)
         self.activation_ctrl = ActivationController(acc_addr_width, act_addr_width, maxreps, c_shape.width * config.rows)
 
         self.store_ctrl = StoreController(act_addr_width, config.host_addr_width, self.act_mem.width, maxreps)
-        self.act_mem.add_reader(self.store_ctrl.src_req, self.store_ctrl.src_resp)
+        self.act_rarb.add(self.store_ctrl.read)
+
+        self.acc_warb = FixedPriorityArbiter(self.acc_mem.write.signature.flip())
+        self.acc_warb.add(self.ex_ctrl.write)
+        self.acc_warb.add(self.load_ctrl.acc_dst)
 
         #FIXME: this can be simplified to a single DMAReader with configurable de-serializer based on destination width
         self.instr_dma_reader  = DMAReader(
@@ -133,6 +138,8 @@ class TPU(Component):
         m.submodules.acc_mem           = self.acc_mem
         m.submodules.acc_warb          = self.acc_warb
         m.submodules.act_mem           = self.act_mem
+        m.submodules.act_rarb          = self.act_rarb
+        m.submodules.act_warb          = self.act_warb
         m.submodules.weight_fifo       = self.weight_fifo
         m.submodules.sa                = self.sa
         m.submodules.ex_ctrl           = self.ex_ctrl
@@ -189,24 +196,12 @@ class TPU(Component):
             self.activation_ctrl.actfn_done.eq(self.actfn.done),
         ]
 
-        #FIXME:
-        # connect(m, self.acc_mem.write, self.ex_ctrl.write_output)
-        m.d.comb += [
-            self.acc_mem.write.valid.eq(self.acc_warb.req.any()),
-            self.acc_mem.write.payload.raddr.eq(self.ex_ctrl.write_output.payload.raddr),
-            self.acc_mem.write.payload.waddr.eq(
-                am.Mux(self.acc_warb.grant, self.load_ctrl.acc_dst.payload.addr, self.ex_ctrl.write_output.payload.waddr)),
-            self.acc_mem.write.payload.data.eq(
-                am.Mux(self.acc_warb.grant, self.load_ctrl.acc_dst.payload.data, self.ex_ctrl.write_output.payload.data)),
-            self.acc_mem.write.payload.acc.eq(am.Mux(self.acc_warb.grant, AccMode.NO, self.ex_ctrl.write_output.payload.acc)),
-            self.acc_warb.req[0].eq(self.ex_ctrl.write_output.valid),
-            self.acc_warb.req[1].eq(self.load_ctrl.acc_dst.valid),
-            self.ex_ctrl.write_output.ready.eq(self.acc_warb.grant == 0),
-            self.load_ctrl.acc_dst.ready.eq(self.acc_warb.grant == 1),
-        ]
+        connect(m, self.act_rarb, self.act_mem.read)
+        connect(m, self.act_warb, self.act_mem.write)
 
-        connect(m, self.activation_ctrl.src_req, self.acc_mem.read.req)
-        connect(m, self.acc_mem.read.resp, self.activation_ctrl.src_resp)
+        connect(m, self.acc_warb, self.acc_mem.write)
+        connect(m, self.acc_mem.read, self.activation_ctrl.src)
+
         connect(m, self.activation_ctrl.dst, self.actfn.req)
 
         connect(m, self.weight_fifo.r_stream, self.preload_ctrl.src)
@@ -227,8 +222,8 @@ class TPU(Component):
             self.sa.b.eq(self.preload_ctrl.dst.payload),
             self.sa.load.eq(self.preload_ctrl.dst.valid),
 
-            self.sa.a.eq(self.ex_ctrl.input_resp.payload),
-            self.ex_ctrl.write_output.payload.data.eq(self.sa.cout),
+            self.sa.a.eq(self.ex_ctrl.read.resp.payload),
+            self.ex_ctrl.write.req.payload.data.eq(self.sa.cout),
         ]
         return m
 
