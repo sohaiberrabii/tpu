@@ -6,6 +6,7 @@ from amaranth.utils import ceil_log2
 from tpu.isa import Activation, AccMode
 from tpu.helpers import Shifter
 from tpu.memory import AccWriteIO, MemoryReadIO, MemoryWriteIO
+from tpu.pe import ExecuteIO, PreloadIO
 
 
 class Request(data.StructLayout):
@@ -146,6 +147,7 @@ class ExecuteController(Component):
         super().__init__({
             "req":   In(stream.Signature(ExecuteRequest(src_addr_width, dst_addr_width, max_repeats))),
             "read":  Out(MemoryReadIO(src_addr_width, input_width, resp_always_ready=True)),
+            "exec":  Out(ExecuteIO(input_width, output_width)),
             "write": Out(AccWriteIO(dst_addr_width, output_width)),
             "done":  Out(1),
         })
@@ -163,6 +165,9 @@ class ExecuteController(Component):
             self.read.req.valid.eq(~req_read_done),
             self.valid_shifter.d.eq(self.read.resp.valid),
             self.write.req.valid.eq(self.valid_shifter.q),
+
+            self.exec.a.eq(self.read.resp.payload.data),
+            self.write.req.payload.data.eq(self.exec.cout),
         ]
 
         # source address control
@@ -222,7 +227,7 @@ class PreloadController(Component):
         super().__init__({
             "req": In(stream.Signature(data.StructLayout({"wsel": 1}))),
             "src": In(stream.Signature(transfer_unit)),
-            "dst": Out(stream.Signature(transfer_unit, always_ready=True)),
+            "preload": Out(PreloadIO(transfer_unit)),
         })
     def elaborate(self, _):
         m = am.Module()
@@ -235,9 +240,9 @@ class PreloadController(Component):
 
         m.d.comb += [
             self.req.ready.eq(done),
-            self.src.ready.eq(self.dst.ready & ~done),
-            self.dst.payload.eq(self.src.payload),
-            self.dst.valid.eq(self.src.valid & ~done),
+            self.src.ready.eq(~done),
+            self.preload.b.eq(self.src.payload),
+            self.preload.load.eq(self.src.valid & ~done),
         ]
         return m
 
@@ -245,7 +250,6 @@ class ActivationRequest(Request):
     def __init__(self, src_addr_width, dst_addr_width, max_repeats):
         super().__init__(src_addr_width, dst_addr_width, max_repeats, extra={"actfn": Activation})
 
-#FIXME: execute controller and activation controller are quite similar
 class ActivationController(Component):
     def __init__(self, src_addr_width, dst_addr_width, max_repeats, width):
         self.repeat_counter = am.Signal(range(max_repeats + 1))

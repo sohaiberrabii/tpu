@@ -6,7 +6,7 @@ from amaranth.lib import data, fifo
 from amaranth.utils import ceil_log2, exact_log2
 from amaranth_soc import csr
 
-from tpu.pe import PE, SystolicDelay
+from tpu.pe import SystolicArray
 from tpu.controller import ExecuteController, PreloadController, ActivationController, LoadController, StoreController
 from tpu.memory import Scratchpad, Accumulator, FixedPriorityArbiter
 from tpu.isa import ISALayout
@@ -76,12 +76,12 @@ class TPU(Component):
             acc_addr_width, self.acc_mem.width, config.acc_max_reps)
         self.act_warb.add(self.load_ctrl.dst)
 
-        self.sa = SystolicDelay(PE(a_shape, b_shape, c_shape, latency=1).tile(config.rows, config.cols), "a")
+        self.sa = SystolicArray(config.rows, config.cols, a_shape, b_shape, c_shape)
         self.actfn = ActivationUnit(self.acc_mem.width, data.ArrayLayout(a_shape, config.rows), act_addr_width)
         self.act_warb.add(self.actfn.write)
 
         self.ex_ctrl = ExecuteController(
-            act_addr_width, acc_addr_width, maxreps, a_shape.width * config.rows, c_shape.width * config.cols, self.sa.latency(("a", "cout")))
+            act_addr_width, acc_addr_width, maxreps, a_shape.width * config.rows, c_shape.width * config.cols, self.sa.latency)
         self.act_rarb.add(self.ex_ctrl.read)
 
         self.preload_ctrl = PreloadController(b_shape.width * config.cols, config.rows)
@@ -218,13 +218,8 @@ class TPU(Component):
             self.instr_dma_reader.req.payload.reps.eq(self.ninstrs.f.nins.data),
         ]
 
-        m.d.comb += [
-            self.sa.b.eq(self.preload_ctrl.dst.payload),
-            self.sa.load.eq(self.preload_ctrl.dst.valid),
-
-            self.sa.a.eq(self.ex_ctrl.read.resp.payload),
-            self.ex_ctrl.write.req.payload.data.eq(self.sa.cout),
-        ]
+        connect(m, self.sa.execute, self.ex_ctrl.exec)
+        connect(m, self.sa.preload, self.preload_ctrl.preload)
         return m
 
 

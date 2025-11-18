@@ -1,9 +1,40 @@
 from __future__ import annotations
 import amaranth as am
-from amaranth.lib.wiring import In, Out, Component
+from amaranth.lib.wiring import In, Out, Component, Signature
 from amaranth.lib import data
 
 from tpu.helpers import Shifter
+
+
+class ExecuteIO(Signature):
+    def __init__(self, input_width, output_width):
+        super().__init__({"a": Out(input_width), "cout": In(output_width)})
+
+class PreloadIO(Signature):
+    def __init__(self, width):
+        super().__init__({"load": Out(1), "b": Out(width)})
+
+class SystolicArray(Component):
+    def __init__(self, rows, cols, a_shape, b_shape, c_shape):
+        self.sa = SystolicDelay(PE(a_shape, b_shape, c_shape, latency=1).tile(rows, cols), "a")
+        super().__init__({
+            "preload": In(PreloadIO(b_shape.width * cols)),
+            "execute": In(ExecuteIO(a_shape.width * rows, c_shape.width * cols)),
+        })
+    def elaborate(self, _):
+        m = am.Module()
+        m.submodules.sa = self.sa
+        m.d.comb += [
+            self.sa.b.eq(self.preload.b),
+            self.sa.load.eq(self.preload.load),
+
+            self.sa.a.eq(self.execute.a),
+            self.execute.cout.eq(self.sa.cout),
+        ]
+        return m
+
+    @property
+    def latency(self): return self.sa.latency(("a", "cout"))
 
 class PE(Component):
     def __init__(self, a_shape, b_shape, c_shape, latency=0):
