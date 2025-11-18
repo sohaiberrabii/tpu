@@ -1,11 +1,9 @@
 import amaranth as am
 from amaranth.lib import data, stream
-from amaranth.lib.wiring import In, Out, Component
+from amaranth.lib.wiring import In, Out, Component, Signature
 from amaranth.utils import ceil_log2
 
 from tpu.isa import Activation
-from tpu.helpers import Shifter
-from tpu.memory import MemoryWriteIO
 
 
 def clip(x, min, max):
@@ -27,7 +25,6 @@ class Scaler(Component):
             "req": In(stream.Signature(data.StructLayout({
                 "a": in_shape, "b": in_shape, "zp": out_shape.elem_shape, "shamt": ceil_log2(max_shift + 1)}))),
             "resp": Out(stream.Signature(out_shape)),
-            "done": Out(1),
         })
     def elaborate(self, _):
         m = am.Module()
@@ -46,10 +43,7 @@ class Scaler(Component):
         with m.Elif(~self.resp.valid | self.resp.ready):
             m.d.sync += valid_muls.eq(0)
 
-        m.d.comb += [
-            self.req.ready.eq(~valid_muls | ~self.resp.valid | self.resp.ready),
-            self.done.eq(~valid_muls & ~self.resp.valid),
-        ]
+        m.d.comb += self.req.ready.eq(~valid_muls | ~self.resp.valid | self.resp.ready)
 
         return m
 
@@ -57,8 +51,15 @@ class ScalerConfig(data.StructLayout):
     def __init__(self, qmul_shape, zp_shape, shamt_width):
         super().__init__({"qmul": qmul_shape, "shamt": shamt_width, "zp": zp_shape})
 
-class ActivationUnit(Component):
-    def __init__(self, src_layout, dst_layout, addr_width):
+class ActivationPipelineIO(Signature):
+    def __init__(self, input_shape, output_shape):
+        super().__init__({
+            "req": Out(stream.Signature(data.StructLayout({"data": input_shape, "actfn": Activation}))),
+            "resp": In(stream.Signature(data.StructLayout({"data": output_shape}))),
+        })
+
+class ActivationPipeline(Component):
+    def __init__(self, src_layout, dst_layout):
         assert isinstance(src_layout, data.ArrayLayout) and isinstance(dst_layout, data.ArrayLayout)
 
         self.qmul = am.Signal(src_layout.elem_shape)
@@ -66,13 +67,10 @@ class ActivationUnit(Component):
         self.zp = am.Signal(dst_layout.elem_shape)
 
         self.scaler = Scaler(src_layout, dst_layout, max_shift=src_layout.elem_shape.width * 2 - 1)
-        self.sync_shifter = Shifter(addr_width, 2) #TODO: make this generic along with scaler pipeline depth
 
         super().__init__({
             "config": In(stream.Signature(ScalerConfig(self.qmul.shape(), self.zp.shape(), self.shamt.shape()), always_ready=True)),
-            "req": In(stream.Signature(data.StructLayout({"addr": addr_width, "data": src_layout, "actfn": Activation}))),
-            "write": Out(MemoryWriteIO(addr_width, dst_layout)),
-            "done": Out(1),
+            "execute": In(ActivationPipelineIO(src_layout, dst_layout))
         })
 
     def elaborate(self, _):
@@ -85,33 +83,27 @@ class ActivationUnit(Component):
             ]
 
         m.submodules.scaler = self.scaler
-        m.submodules.sync_shifter = self.sync_shifter
 
-        with m.If(self.req.valid & self.req.ready):
+        with m.If(self.execute.req.valid & self.execute.req.ready):
             m.d.sync += [
-                self.sync_shifter.d.eq(self.req.payload.addr),
                 self.scaler.req.valid.eq(1),
             ]
-            with m.Switch(self.req.payload.actfn):
+            with m.Switch(self.execute.req.payload.actfn):
                 with m.Case(Activation.NONE):
-                    m.d.sync += self.scaler.req.payload.a.eq(self.req.payload.data)
+                    m.d.sync += self.scaler.req.payload.a.eq(self.execute.req.payload.data)
                 with m.Case(Activation.RELU):
-                    m.d.sync += [act.eq(am.Mux(p[-1], 0, p)) for act, p in zip(self.scaler.req.payload.a, self.req.payload.data)]
+                    m.d.sync += [act.eq(am.Mux(p[-1], 0, p)) for act, p in zip(self.scaler.req.payload.a, self.execute.req.payload.data)]
         with m.Elif(self.scaler.req.ready):
             m.d.sync += self.scaler.req.valid.eq(0)
 
         m.d.comb += [
-            self.sync_shifter.en.eq(self.scaler.req.ready),
-            self.write.req.payload.addr.eq(self.sync_shifter.q),
-
-            self.scaler.req.payload.b.eq(self.qmul.replicate(self.req.payload.data.shape().length)),
+            self.scaler.req.payload.b.eq(self.qmul.replicate(self.execute.req.payload.data.shape().length)),
             self.scaler.req.payload.shamt.eq(self.shamt),
             self.scaler.req.payload.zp.eq(self.zp),
-            self.scaler.resp.ready.eq(self.write.req.ready),
+            self.scaler.resp.ready.eq(self.execute.resp.ready),
 
-            self.req.ready.eq(self.scaler.req.ready),
-            self.write.req.valid.eq(self.scaler.resp.valid),
-            self.write.req.payload.data.eq(self.scaler.resp.payload),
-            self.done.eq(self.scaler.done & ~self.scaler.req.valid),
+            self.execute.req.ready.eq(self.scaler.req.ready),
+            self.execute.resp.valid.eq(self.scaler.resp.valid),
+            self.execute.resp.payload.data.eq(self.scaler.resp.payload),
         ]
         return m

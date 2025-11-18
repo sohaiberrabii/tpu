@@ -13,7 +13,7 @@ from tpu.isa import ISALayout
 from tpu.decoder import InstructionDecoder
 from tpu import bus
 from tpu.bus import DMAReader, DMAWriter, Arbiter, AXI4Lite, AXI4LiteCSRBridge
-from tpu.eltwise import ActivationUnit
+from tpu.eltwise import ActivationPipeline
 from tpu.sw import IntType
 
 
@@ -76,16 +76,17 @@ class TPU(Component):
             acc_addr_width, self.acc_mem.width, config.acc_max_reps)
         self.act_warb.add(self.load_ctrl.dst)
 
-        self.sa = SystolicArray(config.rows, config.cols, a_shape, b_shape, c_shape)
-        self.actfn = ActivationUnit(self.acc_mem.width, data.ArrayLayout(a_shape, config.rows), act_addr_width)
-        self.act_warb.add(self.actfn.write)
+        self.preload_ctrl = PreloadController(b_shape.width * config.cols, config.rows)
 
+        self.sa = SystolicArray(config.rows, config.cols, a_shape, b_shape, c_shape)
         self.ex_ctrl = ExecuteController(
             act_addr_width, acc_addr_width, maxreps, a_shape.width * config.rows, c_shape.width * config.cols, self.sa.latency)
         self.act_rarb.add(self.ex_ctrl.read)
 
-        self.preload_ctrl = PreloadController(b_shape.width * config.cols, config.rows)
-        self.activation_ctrl = ActivationController(acc_addr_width, act_addr_width, maxreps, c_shape.width * config.rows)
+        self.actp = ActivationPipeline(self.acc_mem.width, data.ArrayLayout(a_shape, config.rows))
+        self.activation_ctrl = ActivationController(
+            acc_addr_width, act_addr_width, maxreps, c_shape.width * config.cols, a_shape.width * config.rows)
+        self.act_warb.add(self.activation_ctrl.write)
 
         self.store_ctrl = StoreController(act_addr_width, config.host_addr_width, self.act_mem.width, maxreps)
         self.act_rarb.add(self.store_ctrl.read)
@@ -149,7 +150,7 @@ class TPU(Component):
         m.submodules.store_ctrl        = self.store_ctrl
 
         m.submodules.activation_ctrl   = self.activation_ctrl
-        m.submodules.actfn             = self.actfn
+        m.submodules.actp              = self.actp
 
         m.submodules.instr_dma_reader  = self.instr_dma_reader
         m.submodules.weight_dma_reader = self.weight_dma_reader
@@ -189,20 +190,19 @@ class TPU(Component):
         connect(m, self.decoder.preload_req, self.preload_ctrl.req)
         connect(m, self.decoder.ex_req, self.ex_ctrl.req)
         connect(m, self.decoder.activation_req, self.activation_ctrl.req)
-        connect(m, self.decoder.scaler_cfg, self.actfn.config)
+        connect(m, self.decoder.scaler_cfg, self.actp.config)
         m.d.comb += [
             self.decoder.ex_done.eq(self.ex_ctrl.done),
             self.decoder.act_done.eq(self.activation_ctrl.done),
-            self.activation_ctrl.actfn_done.eq(self.actfn.done),
         ]
 
         connect(m, self.act_rarb, self.act_mem.read)
         connect(m, self.act_warb, self.act_mem.write)
 
         connect(m, self.acc_warb, self.acc_mem.write)
-        connect(m, self.acc_mem.read, self.activation_ctrl.src)
+        connect(m, self.acc_mem.read, self.activation_ctrl.read)
 
-        connect(m, self.activation_ctrl.dst, self.actfn.req)
+        connect(m, self.activation_ctrl.exec, self.actp.execute)
 
         connect(m, self.weight_fifo.r_stream, self.preload_ctrl.src)
         connect(m, self.weight_dma_reader.resp, self.weight_fifo.w_stream)

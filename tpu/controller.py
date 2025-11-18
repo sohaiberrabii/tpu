@@ -3,6 +3,7 @@ from amaranth.lib.wiring import In, Out, Component
 from amaranth.lib import stream, data
 from amaranth.utils import ceil_log2
 
+from tpu.eltwise import ActivationPipelineIO
 from tpu.isa import Activation, AccMode
 from tpu.helpers import Shifter
 from tpu.memory import AccWriteIO, MemoryReadIO, MemoryWriteIO
@@ -251,17 +252,16 @@ class ActivationRequest(Request):
         super().__init__(src_addr_width, dst_addr_width, max_repeats, extra={"actfn": Activation})
 
 class ActivationController(Component):
-    def __init__(self, src_addr_width, dst_addr_width, max_repeats, width):
+    def __init__(self, src_addr_width, dst_addr_width, max_repeats, src_width, dst_width):
         self.repeat_counter = am.Signal(range(max_repeats + 1))
         self.ack_counter = am.Signal(range(max_repeats + 1))
 
         super().__init__({
-            "req": In(stream.Signature(ActivationRequest(src_addr_width, dst_addr_width, max_repeats))),
-            "src": Out(MemoryReadIO(src_addr_width, width)),
-            "dst": Out(stream.Signature(data.StructLayout({"addr": dst_addr_width, "data": width, "actfn": Activation}))),
-
-            "actfn_done": In(1),
-            "done":       Out(1),
+            "req":  In(stream.Signature(ActivationRequest(src_addr_width, dst_addr_width, max_repeats))),
+            "read": Out(MemoryReadIO(src_addr_width, src_width)),
+            "exec": Out(ActivationPipelineIO(src_width, dst_width)),
+            "write": Out(MemoryWriteIO(dst_addr_width, dst_width)),
+            "done": Out(1),
         })
 
     def elaborate(self, _):
@@ -270,36 +270,44 @@ class ActivationController(Component):
         req_read_done = self.repeat_counter == 0
         req_output_done = self.ack_counter == 0
 
-        with m.If(self.req.valid & self.req.ready):
+        req_hs = self.req.valid & self.req.ready
+        read_hs = self.read.req.valid & self.read.req.ready
+        write_hs = self.write.req.valid & self.write.req.ready
+
+        with m.If(req_hs):
             m.d.sync += [
                 self.repeat_counter.eq(self.req.payload.reps),
-                self.src.req.payload.addr.eq(self.req.payload.src_addr),
-            ]
-        with m.Elif(self.src.req.valid & self.src.req.ready):
-            m.d.sync += [
-                self.repeat_counter.eq(self.repeat_counter - 1),
-                self.src.req.payload.addr.eq(self.src.req.payload.addr + 1),
+                self.read.req.payload.addr.eq(self.req.payload.src_addr),
+
+                self.ack_counter.eq(self.req.payload.reps),
+                self.write.req.payload.addr.eq(self.req.payload.dst_addr),
+
+                self.exec.req.payload.actfn.eq(self.req.payload.actfn),
             ]
 
-        with m.If(self.req.valid & self.req.ready):
+        with m.If(read_hs & ~req_hs):
             m.d.sync += [
-                self.ack_counter.eq(self.req.payload.reps),
-                self.dst.payload.addr.eq(self.req.payload.dst_addr),
-                self.dst.payload.actfn.eq(self.req.payload.actfn),
+                self.repeat_counter.eq(self.repeat_counter - 1),
+                self.read.req.payload.addr.eq(self.read.req.payload.addr + 1),
             ]
-        with m.Elif(self.dst.valid & self.dst.ready):
+
+        with m.If(write_hs & ~req_hs):
             m.d.sync += [
                 self.ack_counter.eq(self.ack_counter - 1),
-                self.dst.payload.addr.eq(self.dst.payload.addr + 1),
+                self.write.req.payload.addr.eq(self.write.req.payload.addr + 1),
             ]
 
         m.d.comb += [
-            self.done.eq(self.req.ready & self.actfn_done),
-            self.req.ready.eq(req_read_done & req_output_done),
-            self.src.req.valid.eq(~req_read_done & self.dst.ready), #acc mem is not stallable, only issue request if dst is also ready
+            self.done.eq(self.req.ready),
+            self.req.ready.eq(req_output_done),
+            self.read.req.valid.eq(~req_read_done),
 
-            self.src.resp.ready.eq(self.dst.ready),
-            self.dst.valid.eq(self.src.resp.valid),
-            self.dst.payload.data.eq(self.src.resp.payload.data),
+            self.read.resp.ready.eq(self.exec.req.ready),
+            self.exec.req.payload.data.eq(self.read.resp.payload.data),
+            self.exec.req.valid.eq(self.read.resp.valid),
+
+            self.exec.resp.ready.eq(self.write.req.ready),
+            self.write.req.valid.eq(self.exec.resp.valid),
+            self.write.req.payload.data.eq(self.exec.resp.payload.data),
         ]
         return m
